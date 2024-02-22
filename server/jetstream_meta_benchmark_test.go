@@ -22,7 +22,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/nats-io/nats.go"
+	"github.com/tiiuae/nats.go"
 )
 
 func BenchmarkJetStreamCreate(b *testing.B) {

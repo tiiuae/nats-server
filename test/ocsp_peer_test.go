@@ -29,7 +29,7 @@ import (
 	"golang.org/x/crypto/ocsp"
 
 	"github.com/nats-io/nats-server/v2/server"
-	"github.com/nats-io/nats.go"
+	"github.com/tiiuae/nats.go"
 )
 
 func newOCSPResponderRootCA(t *testing.T) *http.Server {

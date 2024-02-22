@@ -18,7 +18,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/nats-io/nats.go"
+	"github.com/tiiuae/nats.go"
 )
 
 func TestMultipleUserAuth(t *testing.T) {

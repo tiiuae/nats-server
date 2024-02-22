@@ -44,9 +44,9 @@ import (
 
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-server/v2/server/sysmem"
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	"github.com/nats-io/nuid"
+	"github.com/tiiuae/nats.go"
 )
 
 func TestJetStreamBasicNilConfig(t *testing.T) {
@@ -21693,7 +21693,7 @@ func TestJetStreamUsageSyncDeadlock(t *testing.T) {
 	sendStreamMsg(t, nc, "foo", "hello")
 }
 
-// https://github.com/nats-io/nats.go/issues/1382
+// https://github.com/tiiuae/nats.go/issues/1382
 // https://github.com/nats-io/nats-server/issues/4445
 func TestJetStreamChangeMaxMessagesPerSubject(t *testing.T) {
 	s := RunBasicJetStreamServer(t)

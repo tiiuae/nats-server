@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
+	"github.com/tiiuae/nats.go"
 )
 
 func TestServerRestartReSliceIssue(t *testing.T) {

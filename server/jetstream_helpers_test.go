@@ -29,7 +29,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
+	"github.com/tiiuae/nats.go"
 	"golang.org/x/time/rate"
 )
 

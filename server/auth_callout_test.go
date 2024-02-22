@@ -28,8 +28,8 @@ import (
 	"time"
 
 	"github.com/nats-io/jwt/v2"
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
+	"github.com/tiiuae/nats.go"
 )
 
 // Helper function to decode an auth request.

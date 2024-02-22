@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats-server/v2/internal/fastrand"
-	"github.com/nats-io/nats.go"
+	"github.com/tiiuae/nats.go"
 )
 
 func BenchmarkJetStreamConsume(b *testing.B) {

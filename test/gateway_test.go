@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats-server/v2/server"
-	"github.com/nats-io/nats.go"
+	"github.com/tiiuae/nats.go"
 )
 
 func testDefaultOptionsForGateway(name string) *server.Options {

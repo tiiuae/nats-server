@@ -35,7 +35,7 @@ import (
 
 	"github.com/klauspost/compress/s2"
 	jwt "github.com/nats-io/jwt/v2"
-	"github.com/nats-io/nats.go"
+	"github.com/tiiuae/nats.go"
 
 	"github.com/nats-io/nats-server/v2/internal/testhelper"
 )

@@ -27,7 +27,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
+	"github.com/tiiuae/nats.go"
 
 	"github.com/nats-io/nats-server/v2/server"
 )
