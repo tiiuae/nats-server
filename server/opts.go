@@ -38,6 +38,7 @@ import (
 	"github.com/nats-io/nats-server/v2/server/certidp"
 	"github.com/nats-io/nats-server/v2/server/certstore"
 	"github.com/nats-io/nkeys"
+	"github.com/quic-go/quic-go"
 )
 
 var allowUnknownTopLevelField = int32(0)
@@ -310,6 +311,7 @@ type Options struct {
 	JsAccDefaultDomain    map[string]string `json:"-"` // account to domain name mapping
 	Websocket             WebsocketOpts     `json:"-"`
 	MQTT                  MQTTOpts          `json:"-"`
+	QUIC                  QUICOpts          `json:"-"`
 	ProfPort              int               `json:"-"`
 	ProfBlockRate         int               `json:"-"`
 	PidFile               string            `json:"-"`
@@ -574,6 +576,20 @@ type MQTTOpts struct {
 	// downgradeQOS2Sub tells the MQTT client to downgrade QoS2 SUBSCRIBE
 	// requests to QoS1.
 	downgradeQoS2Sub bool
+}
+
+type QUICOpts struct {
+	Host string
+	Port int
+
+	Advertise string
+
+	TLSConfig *tls.Config
+
+	QUICConfig           *quic.Config
+	HandshakeIdleTimeout time.Duration
+
+	tlsConfigOpts *TLSConfigOpts
 }
 
 type netResolver interface {
@@ -1479,6 +1495,11 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 		}
 	case "mqtt":
 		if err := parseMQTT(tk, o, errors, warnings); err != nil {
+			*errors = append(*errors, err)
+			return
+		}
+	case "quic":
+		if err := parseQUIC(tk, o, errors, warnings); err != nil {
 			*errors = append(*errors, err)
 			return
 		}
@@ -4803,6 +4824,83 @@ func parseMQTT(v interface{}, o *Options, errors *[]error, warnings *[]error) er
 	return nil
 }
 
+func parseQUIC(v interface{}, o *Options, errors *[]error, warnings *[]error) error {
+	var lt token
+	defer convertPanicToErrorList(&lt, errors)
+
+	tk, v := unwrapValue(v, &lt)
+	gm, ok := v.(map[string]interface{})
+	if !ok {
+		return &configErr{tk, fmt.Sprintf("Expected QUIC to be a map, got %T", v)}
+	}
+	for mk, mv := range gm {
+		// Again, unwrap token value if line check is required.
+		tk, mv = unwrapValue(mv, &lt)
+		switch strings.ToLower(mk) {
+		case "listen":
+			hp, err := parseListen(mv)
+			if err != nil {
+				err := &configErr{tk, err.Error()}
+				*errors = append(*errors, err)
+				continue
+			}
+			o.QUIC.Host = hp.host
+			o.QUIC.Port = hp.port
+		case "port":
+			o.QUIC.Port = int(mv.(int64))
+		case "host", "net":
+			o.QUIC.Host = mv.(string)
+		case "advertise":
+			o.QUIC.Advertise = mv.(string)
+		case "tls":
+			tc, err := parseTLS(tk, true)
+			if err != nil {
+				*errors = append(*errors, err)
+				continue
+			}
+			if o.QUIC.TLSConfig, err = GenTLSConfig(tc); err != nil {
+				err := &configErr{tk, err.Error()}
+				*errors = append(*errors, err)
+				continue
+			}
+			o.QUIC.tlsConfigOpts = tc
+		case "handshake_idle_timeout":
+			ht := time.Duration(0)
+			switch mv := mv.(type) {
+			case int64:
+				ht = time.Duration(mv) * time.Second
+			case string:
+				var err error
+				ht, err = time.ParseDuration(mv)
+				if err != nil {
+					err := &configErr{tk, err.Error()}
+					*errors = append(*errors, err)
+					continue
+				}
+			default:
+				err := &configErr{tk, fmt.Sprintf("error parsing handshake idle timeout: unsupported type %T", mv)}
+				*errors = append(*errors, err)
+			}
+			o.QUIC.HandshakeIdleTimeout = ht
+		default:
+			if !tk.IsUsedVariable() {
+				err := &unknownConfigFieldErr{
+					field: mk,
+					configErr: configErr{
+						token: tk,
+					},
+				}
+				*errors = append(*errors, err)
+				continue
+			}
+		}
+	}
+	o.QUIC.QUICConfig = &quic.Config{
+		HandshakeIdleTimeout: o.QUIC.HandshakeIdleTimeout,
+	}
+	return nil
+}
+
 // GenTLSConfig loads TLS related configuration parameters.
 func GenTLSConfig(tc *TLSConfigOpts) (*tls.Config, error) {
 	// Create the tls.Config from our options before including the certs.
@@ -5229,6 +5327,11 @@ func setBaselineOptions(opts *Options) {
 		}
 		if opts.MQTT.TLSTimeout == 0 {
 			opts.MQTT.TLSTimeout = float64(TLS_TIMEOUT) / float64(time.Second)
+		}
+	}
+	if opts.QUIC.Port != 0 {
+		if opts.QUIC.Host == _EMPTY_ {
+			opts.QUIC.Host = DEFAULT_HOST
 		}
 	}
 	// JetStream

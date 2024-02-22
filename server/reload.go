@@ -1584,6 +1584,18 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			tmpNew.ConsumerReplicas = newValue.(MQTTOpts).ConsumerReplicas
 			tmpNew.ConsumerMemoryStorage = newValue.(MQTTOpts).ConsumerMemoryStorage
 			tmpNew.ConsumerInactiveThreshold = newValue.(MQTTOpts).ConsumerInactiveThreshold
+		case "quic":
+			// Similar to gateways
+			tmpOld := oldValue.(QUICOpts)
+			tmpNew := newValue.(QUICOpts)
+			tmpOld.TLSConfig, tmpOld.tlsConfigOpts, tmpOld.QUICConfig = nil, nil, nil
+			tmpNew.TLSConfig, tmpNew.tlsConfigOpts, tmpNew.QUICConfig = nil, nil, nil
+			// If there is really a change prevents reload.
+			if !reflect.DeepEqual(tmpOld, tmpNew) {
+				// See TODO(ik) note below about printing old/new values.
+				return nil, fmt.Errorf("config reload not supported for %s: old=%v, new=%v",
+					field.Name, oldValue, newValue)
+			}
 		case "connecterrorreports":
 			diffOpts = append(diffOpts, &connectErrorReports{newValue: newValue.(int)})
 		case "reconnecterrorreports":

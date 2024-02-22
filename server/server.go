@@ -304,6 +304,8 @@ type Server struct {
 	// MQTT structure
 	mqtt srvMQTT
 
+	quic srvQUIC
+
 	// OCSP monitoring
 	ocsps []*OCSPMonitor
 
@@ -2367,6 +2369,10 @@ func (s *Server) Start() {
 		s.startWebsocketServer()
 	}
 
+	if opts.QUIC.Port != 0 {
+		s.startQUICServer()
+	}
+
 	// Start up listen if we want to accept leaf node connections.
 	if opts.LeafNode.Port != 0 {
 		// Will resolve or assign the advertise address for the leafnode listener.
@@ -2633,8 +2639,7 @@ func (s *Server) AcceptLoop(clr chan struct{}) {
 	// Setup state that can enable shutdown
 	s.mu.Lock()
 	hp := net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port))
-	// l, e := natsListen("tcp", hp)
-	l, e := quicListen(hp, opts.TLSConfig, nil)
+	l, e := natsListen("tcp", hp)
 	s.listenerErr = e
 	if e != nil {
 		s.mu.Unlock()
@@ -3118,37 +3123,37 @@ func (s *Server) createClientEx(conn net.Conn, inProcess bool) *client {
 
 	c.Debugf("Client connection created")
 
-	// // Save info.TLSRequired value since we may neeed to change it back and forth.
-	// orgInfoTLSReq := info.TLSRequired
+	// Save info.TLSRequired value since we may neeed to change it back and forth.
+	orgInfoTLSReq := info.TLSRequired
 
-	// var tlsFirstFallback time.Duration
-	// // Check if we should do TLS first.
-	// tlsFirst := opts.TLSConfig != nil && opts.TLSHandshakeFirst
-	// if tlsFirst {
-	// 	// Make sure info.TLSRequired is set to true (it could be false
-	// 	// if AllowNonTLS is enabled).
-	// 	info.TLSRequired = true
-	// 	// Get the fallback delay value if applicable.
-	// 	if f := opts.TLSHandshakeFirstFallback; f > 0 {
-	// 		tlsFirstFallback = f
-	// 	} else if inProcess {
-	// 		// For in-process connection, we will always have a fallback
-	// 		// delay. It allows support for non-TLS, TLS and "TLS First"
-	// 		// in-process clients to successfully connect.
-	// 		tlsFirstFallback = DEFAULT_TLS_HANDSHAKE_FIRST_FALLBACK_DELAY
-	// 	}
-	// }
+	var tlsFirstFallback time.Duration
+	// Check if we should do TLS first.
+	tlsFirst := opts.TLSConfig != nil && opts.TLSHandshakeFirst
+	if tlsFirst {
+		// Make sure info.TLSRequired is set to true (it could be false
+		// if AllowNonTLS is enabled).
+		info.TLSRequired = true
+		// Get the fallback delay value if applicable.
+		if f := opts.TLSHandshakeFirstFallback; f > 0 {
+			tlsFirstFallback = f
+		} else if inProcess {
+			// For in-process connection, we will always have a fallback
+			// delay. It allows support for non-TLS, TLS and "TLS First"
+			// in-process clients to successfully connect.
+			tlsFirstFallback = DEFAULT_TLS_HANDSHAKE_FIRST_FALLBACK_DELAY
+		}
+	}
 
 	// Decide if we are going to require TLS or not and generate INFO json.
-	// tlsRequired := info.TLSRequired
+	tlsRequired := info.TLSRequired
 	infoBytes := c.generateClientInfoJSON(info)
 
 	// Send our information, except if TLS and TLSHandshakeFirst is requested.
-	// if !tlsFirst {
-	// Need to be sent in place since writeLoop cannot be started until
-	// TLS handshake is done (if applicable).
-	c.sendProtoNow(infoBytes)
-	// }
+	if !tlsFirst {
+		// Need to be sent in place since writeLoop cannot be started until
+		// TLS handshake is done (if applicable).
+		c.sendProtoNow(infoBytes)
+	}
 
 	// Unlock to register
 	c.mu.Unlock()
@@ -3188,39 +3193,39 @@ func (s *Server) createClientEx(conn net.Conn, inProcess bool) *client {
 
 	isClosed := c.isClosed()
 	var pre []byte
-	// // We need first to check for "TLS First" fallback delay.
-	// if !isClosed && tlsFirstFallback > 0 {
-	// 	// We wait and see if we are getting any data. Since we did not send
-	// 	// the INFO protocol yet, only clients that use TLS first should be
-	// 	// sending data (the TLS handshake). We don't really check the content:
-	// 	// if it is a rogue agent and not an actual client performing the
-	// 	// TLS handshake, the error will be detected when performing the
-	// 	// handshake on our side.
-	// 	pre = make([]byte, 4)
-	// 	c.nc.SetReadDeadline(time.Now().Add(tlsFirstFallback))
-	// 	n, _ := io.ReadFull(c.nc, pre[:])
-	// 	c.nc.SetReadDeadline(time.Time{})
-	// 	// If we get any data (regardless of possible timeout), we will proceed
-	// 	// with the TLS handshake.
-	// 	if n > 0 {
-	// 		pre = pre[:n]
-	// 	} else {
-	// 		// We did not get anything so we will send the INFO protocol.
-	// 		pre = nil
+	// We need first to check for "TLS First" fallback delay.
+	if !isClosed && tlsFirstFallback > 0 {
+		// We wait and see if we are getting any data. Since we did not send
+		// the INFO protocol yet, only clients that use TLS first should be
+		// sending data (the TLS handshake). We don't really check the content:
+		// if it is a rogue agent and not an actual client performing the
+		// TLS handshake, the error will be detected when performing the
+		// handshake on our side.
+		pre = make([]byte, 4)
+		c.nc.SetReadDeadline(time.Now().Add(tlsFirstFallback))
+		n, _ := io.ReadFull(c.nc, pre[:])
+		c.nc.SetReadDeadline(time.Time{})
+		// If we get any data (regardless of possible timeout), we will proceed
+		// with the TLS handshake.
+		if n > 0 {
+			pre = pre[:n]
+		} else {
+			// We did not get anything so we will send the INFO protocol.
+			pre = nil
 
-	// 		// Restore the original info.TLSRequired value if it is
-	// 		// different that the current value and regenerate infoBytes.
-	// 		if orgInfoTLSReq != info.TLSRequired {
-	// 			info.TLSRequired = orgInfoTLSReq
-	// 			infoBytes = c.generateClientInfoJSON(info)
-	// 		}
-	// 		c.sendProtoNow(infoBytes)
-	// 		// Set the boolean to false for the rest of the function.
-	// 		tlsFirst = false
-	// 		// Check closed status again
-	// 		isClosed = c.isClosed()
-	// 	}
-	// }
+			// Restore the original info.TLSRequired value if it is
+			// different that the current value and regenerate infoBytes.
+			if orgInfoTLSReq != info.TLSRequired {
+				info.TLSRequired = orgInfoTLSReq
+				infoBytes = c.generateClientInfoJSON(info)
+			}
+			c.sendProtoNow(infoBytes)
+			// Set the boolean to false for the rest of the function.
+			tlsFirst = false
+			// Check closed status again
+			isClosed = c.isClosed()
+		}
+	}
 	// If we have both TLS and non-TLS allowed we need to see which
 	// one the client wants. We'll always allow this for in-process
 	// connections.
@@ -3231,42 +3236,42 @@ func (s *Server) createClientEx(conn net.Conn, inProcess bool) *client {
 		n, _ := io.ReadFull(c.nc, pre[:])
 		c.nc.SetReadDeadline(time.Time{})
 		pre = pre[:n]
-		// if n > 0 && pre[0] == 0x16 {
-		// 	tlsRequired = true
-		// } else {
-		// 	tlsRequired = false
-		// }
+		if n > 0 && pre[0] == 0x16 {
+			tlsRequired = true
+		} else {
+			tlsRequired = false
+		}
 	}
 
-	// // Check for TLS
-	// if !isClosed && tlsRequired {
-	// 	if s.connRateCounter != nil && !s.connRateCounter.allow() {
-	// 		c.mu.Unlock()
-	// 		c.sendErr("Connection throttling is active. Please try again later.")
-	// 		c.closeConnection(MaxConnectionsExceeded)
-	// 		return nil
-	// 	}
+	// Check for TLS
+	if !isClosed && tlsRequired {
+		if s.connRateCounter != nil && !s.connRateCounter.allow() {
+			c.mu.Unlock()
+			c.sendErr("Connection throttling is active. Please try again later.")
+			c.closeConnection(MaxConnectionsExceeded)
+			return nil
+		}
 
-	// 	// If we have a prebuffer create a multi-reader.
-	// 	if len(pre) > 0 {
-	// 		c.nc = &tlsMixConn{c.nc, bytes.NewBuffer(pre)}
-	// 		// Clear pre so it is not parsed.
-	// 		pre = nil
-	// 	}
-	// 	// Performs server-side TLS handshake.
-	// 	if err := c.doTLSServerHandshake(_EMPTY_, opts.TLSConfig, opts.TLSTimeout, opts.TLSPinnedCerts); err != nil {
-	// 		c.mu.Unlock()
-	// 		return nil
-	// 	}
-	// }
+		// If we have a prebuffer create a multi-reader.
+		if len(pre) > 0 {
+			c.nc = &tlsMixConn{c.nc, bytes.NewBuffer(pre)}
+			// Clear pre so it is not parsed.
+			pre = nil
+		}
+		// Performs server-side TLS handshake.
+		if err := c.doTLSServerHandshake(_EMPTY_, opts.TLSConfig, opts.TLSTimeout, opts.TLSPinnedCerts); err != nil {
+			c.mu.Unlock()
+			return nil
+		}
+	}
 
-	// // Now, send the INFO if it was delayed
-	// if !isClosed && tlsFirst {
-	// 	c.flags.set(didTLSFirst)
-	// 	c.sendProtoNow(infoBytes)
-	// 	// Check closed status
-	// 	isClosed = c.isClosed()
-	// }
+	// Now, send the INFO if it was delayed
+	if !isClosed && tlsFirst {
+		c.flags.set(didTLSFirst)
+		c.sendProtoNow(infoBytes)
+		// Check closed status
+		isClosed = c.isClosed()
+	}
 
 	// Connection could have been closed while sending the INFO proto.
 	if isClosed {
@@ -3294,12 +3299,11 @@ func (s *Server) createClientEx(conn net.Conn, inProcess bool) *client {
 	// Spin up the write loop.
 	s.startGoRoutine(func() { c.writeLoop() })
 
-	// if tlsRequired {
-	c.Debugf("TLS handshake complete")
-	cs := c.nc.(*quicConnStream).ConnectionState().TLS
-	c.Debugf("TLS version %s, cipher suite %s", tlsVersion(cs.Version), tlsCipher(cs.CipherSuite))
-	// }
-
+	if tlsRequired {
+		c.Debugf("TLS handshake complete")
+		cs := c.nc.(*tls.Conn).ConnectionState()
+		c.Debugf("TLS version %s, cipher suite %s", tlsVersion(cs.Version), tlsCipher(cs.CipherSuite))
+	}
 	c.mu.Unlock()
 
 	return c
@@ -3669,6 +3673,7 @@ func (s *Server) readyForConnections(d time.Duration) error {
 		chk["leafnode"] = info{ok: (opts.LeafNode.Port == 0 || s.leafNodeListener != nil), err: s.leafNodeListenerErr}
 		chk["websocket"] = info{ok: (opts.Websocket.Port == 0 || s.websocket.listener != nil), err: s.websocket.listenerErr}
 		chk["mqtt"] = info{ok: (opts.MQTT.Port == 0 || s.mqtt.listener != nil), err: s.mqtt.listenerErr}
+		chk["quic"] = info{ok: (opts.QUIC.Port == 0 || s.quic.listener != nil), err: s.quic.listenerErr}
 		s.mu.RUnlock()
 
 		var numOK int
@@ -4098,6 +4103,9 @@ func (s *Server) serviceListeners() []net.Listener {
 	}
 	if opts.Websocket.Port != 0 {
 		listeners = append(listeners, s.websocket.listener)
+	}
+	if opts.QUIC.Port != 0 {
+		listeners = append(listeners, s.quic.listener)
 	}
 	return listeners
 }
