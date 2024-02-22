@@ -22,7 +22,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/nats-io/nats-server/v2/server/avl"
+	"github.com/tiiuae/nats-server/v2/server/avl"
 )
 
 // StorageType determines how messages are stored for retention.

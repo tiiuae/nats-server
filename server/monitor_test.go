@@ -208,7 +208,7 @@ func pollVarz(t *testing.T, s *Server, mode int, url string, opts *VarzOptions) 
 	return v
 }
 
-// https://github.com/nats-io/nats-server/issues/2170
+// https://github.com/tiiuae/nats-server/issues/2170
 // Just the ever increasing subs part.
 func TestVarzSubscriptionsResetProperly(t *testing.T) {
 	// Run with JS to create a bunch of subs to start.
@@ -4560,7 +4560,7 @@ func TestMonitorReloadTLSConfig(t *testing.T) {
 			ca_file: '../test/configs/certs/ca.pem'
 
 			# Set this to make sure that it does not impact secure monitoring
-			# (which it did, see issue: https://github.com/nats-io/nats-server/issues/2980)
+			# (which it did, see issue: https://github.com/tiiuae/nats-server/issues/2980)
 			verify_and_map: true
 		}
 	`
@@ -5077,7 +5077,7 @@ func TestMonitorConnzSortByRTT(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/4144
+// https://github.com/tiiuae/nats-server/issues/4144
 func TestMonitorAccountszMappingOrderReporting(t *testing.T) {
 	conf := createConfFile(t, []byte(`
 	listen: 127.0.0.1:-1

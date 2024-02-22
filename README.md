@@ -37,17 +37,17 @@ If you are interested in contributing to NATS, read about our...
 [Fossa-Image]: https://app.fossa.io/api/projects/git%2Bgithub.com%2Fnats-io%2Fnats-server.svg?type=shield
 [Build-Status-Url]: https://travis-ci.com/github/nats-io/nats-server
 [Build-Status-Image]: https://travis-ci.com/nats-io/nats-server.svg?branch=main
-[Release-Url]: https://github.com/nats-io/nats-server/releases/latest
+[Release-Url]: https://github.com/tiiuae/nats-server/releases/latest
 [Release-image]: https://img.shields.io/github/v/release/nats-io/nats-server
 [Coverage-Url]: https://coveralls.io/r/nats-io/nats-server?branch=main
 [Coverage-image]: https://coveralls.io/repos/github/nats-io/nats-server/badge.svg?branch=main
 [ReportCard-Url]: https://goreportcard.com/report/nats-io/nats-server
-[ReportCard-Image]: https://goreportcard.com/badge/github.com/nats-io/nats-server
+[ReportCard-Image]: https://goreportcard.com/badge/github.com/tiiuae/nats-server
 [CIIBestPractices-Url]: https://bestpractices.coreinfrastructure.org/projects/1895
 [CIIBestPractices-Image]: https://bestpractices.coreinfrastructure.org/projects/1895/badge
 [ArtifactHub-Url]: https://artifacthub.io/packages/helm/nats/nats
 [ArtifactHub-Image]: https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/nats
-[github-release]: https://github.com/nats-io/nats-server/releases/
+[github-release]: https://github.com/tiiuae/nats-server/releases/
 
 ## Roadmap
 

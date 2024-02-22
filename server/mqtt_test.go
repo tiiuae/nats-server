@@ -7237,7 +7237,7 @@ func testMQTTNewSubWithExistingTopLevelRetainedRace(t *testing.T, o *Options, su
 	subc.Close()
 }
 
-// Issue https://github.com/nats-io/nats-server/issues/3924
+// Issue https://github.com/tiiuae/nats-server/issues/3924
 // The MQTT Server MUST NOT match Topic Filters starting with a wildcard character (# or +),
 // with Topic Names beginning with a $ character [MQTT-4.7.2-1]
 func TestMQTTSubjectWildcardStart(t *testing.T) {
@@ -7403,7 +7403,7 @@ func TestMQTTTopicWithDot(t *testing.T) {
 	require_Equal(t, msg.Subject, "spBv1//0.plant2")
 }
 
-// Issue https://github.com/nats-io/nats-server/issues/4291
+// Issue https://github.com/tiiuae/nats-server/issues/4291
 func TestMQTTJetStreamRepublishAndQoS0Subscribers(t *testing.T) {
 	conf := createConfFile(t, []byte(fmt.Sprintf(`
 		listen: 127.0.0.1:-1

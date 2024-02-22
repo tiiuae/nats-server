@@ -31,9 +31,9 @@ import (
 	"time"
 
 	"github.com/minio/highwayhash"
-	"github.com/nats-io/nats-server/v2/server/sysmem"
 	"github.com/nats-io/nkeys"
 	"github.com/nats-io/nuid"
+	"github.com/tiiuae/nats-server/v2/server/sysmem"
 )
 
 // JetStreamConfig determines this server's configuration.
@@ -1194,7 +1194,7 @@ func (a *Account) EnableJetStream(limits map[string]JetStreamAccountLimits) erro
 	var consumers []*ce
 
 	// Collect any interest policy streams to check for
-	// https://github.com/nats-io/nats-server/issues/3612
+	// https://github.com/tiiuae/nats-server/issues/3612
 	var ipstreams []*stream
 
 	// Remember if we should be encrypted and what cipher we think we should use.

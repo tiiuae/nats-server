@@ -2082,7 +2082,7 @@ func TestServerRateLimitLogging(t *testing.T) {
 	checkLog(c1, c2)
 }
 
-// https://github.com/nats-io/nats-server/discussions/4535
+// https://github.com/tiiuae/nats-server/discussions/4535
 func TestServerAuthBlockAndSysAccounts(t *testing.T) {
 	conf := createConfFile(t, []byte(`
 		listen: 127.0.0.1:-1

@@ -10,7 +10,7 @@ There are there general ways you can contribute to this repo:
 - Reporting a bug or regression
 - Contributing changes to the source code
 
-For the first two, refer to the [GitHub Issues](https://github.com/nats-io/nats-server/issues/new/choose) which guides you through the available options along with the needed information to collect.
+For the first two, refer to the [GitHub Issues](https://github.com/tiiuae/nats-server/issues/new/choose) which guides you through the available options along with the needed information to collect.
 
 ## Contributing changes
 
@@ -34,7 +34,7 @@ A good pull request includes:
 
 ### Sign-off
 
-In order to accept a contribution, you will first need to certify that the contribution is your original work and that you license the work to the project under the [Apache-2.0 license](https://github.com/nats-io/nats-server/blob/main/LICENSE).
+In order to accept a contribution, you will first need to certify that the contribution is your original work and that you license the work to the project under the [Apache-2.0 license](https://github.com/tiiuae/nats-server/blob/main/LICENSE).
 
 This is done by using `Signed-off-by` statements, which should appear in **both** your commit messages and your PR description. Please note that we can only accept sign-offs under a legal name. Nicknames and aliases are not permitted.
 
@@ -42,4 +42,4 @@ To perform a sign-off with `git`, use `git commit -s` (or `--signoff`).
 
 ## Get help
 
-If you have questions about the contribution process, please start a [GitHub discussion](https://github.com/nats-io/nats-server/discussions), join the [NATS Slack](https://slack.nats.io/), or send your question to the [NATS Google Group](https://groups.google.com/forum/#!forum/natsio).
+If you have questions about the contribution process, please start a [GitHub discussion](https://github.com/tiiuae/nats-server/discussions), join the [NATS Slack](https://slack.nats.io/), or send your question to the [NATS Google Group](https://groups.google.com/forum/#!forum/natsio).

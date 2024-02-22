@@ -15,13 +15,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          path: src/github.com/nats-io/nats-server
+          path: src/github.com/tiiuae/nats-server
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: src/github.com/nats-io/nats-server/go.mod
-          cache-dependency-path: src/github.com/nats-io/nats-server/go.sum
+          go-version-file: src/github.com/tiiuae/nats-server/go.mod
+          cache-dependency-path: src/github.com/tiiuae/nats-server/go.sum
 
       - name: Set up testing tools and environment
         shell: bash --noprofile --norc -eo pipefail {0}
@@ -35,14 +35,14 @@ jobs:
       #   uses: dawidd6/action-download-artifact@v2
       #   continue-on-error: true
       #   with:
-      #     path: src/github.com/nats-io/nats-server/bench
+      #     path: src/github.com/tiiuae/nats-server/bench
       #     name: bench-output-${{ runner.os }}
       #     branch: ${{ github.base_ref || github.ref }}
 
       - name: Run tests and benchmarks
         shell: bash --noprofile --norc -eo pipefail {0}
         run: |
-          cd src/github.com/nats-io/nats-server
+          cd src/github.com/tiiuae/nats-server
           go test -v --run='MQTTEx' ./server
           # go test --run='-' --count=10 --bench 'MQTT_' ./server | tee output.txt
           # go test --run='-' --count=10 --bench 'MQTTEx' --timeout=20m --benchtime=100x ./server | tee -a output.txt
@@ -52,16 +52,16 @@ jobs:
       #   uses: benchmark-action/github-action-benchmark@v1
       #   with:
       #     tool: go
-      #     output-file-path: src/github.com/nats-io/nats-server/output.txt
+      #     output-file-path: src/github.com/tiiuae/nats-server/output.txt
       #     github-token: ${{ secrets.GITHUB_TOKEN }}
       #     alert-threshold: 140%
       #     comment-on-alert: true
       #     # fail-on-alert: true
-      #     external-data-json-path: src/github.com/nats-io/nats-server/bench/benchmark-data.json
+      #     external-data-json-path: src/github.com/tiiuae/nats-server/bench/benchmark-data.json
 
       # - name: Store benchmark result for ${{ github.ref_name }}
       #   if: always()
       #   uses: actions/upload-artifact@v3
       #   with:
-      #     path: src/github.com/nats-io/nats-server/bench
+      #     path: src/github.com/tiiuae/nats-server/bench
       #     name: bench-output-${{ runner.os }}

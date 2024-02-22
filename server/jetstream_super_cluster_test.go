@@ -4017,7 +4017,7 @@ func TestJetStreamSuperClusterMovingR1Stream(t *testing.T) {
 	})
 }
 
-// https://github.com/nats-io/nats-server/issues/4396
+// https://github.com/tiiuae/nats-server/issues/4396
 func TestJetStreamSuperClusterR1StreamPeerRemove(t *testing.T) {
 	sc := createJetStreamSuperCluster(t, 1, 3)
 	defer sc.shutdown()

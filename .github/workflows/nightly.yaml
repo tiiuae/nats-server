@@ -17,13 +17,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          path: src/github.com/nats-io/nats-server
+          path: src/github.com/tiiuae/nats-server
           ref: ${{ inputs.target || 'main' }}
 
-      - uses: ./src/github.com/nats-io/nats-server/.github/actions/nightly-release
+      - uses: ./src/github.com/tiiuae/nats-server/.github/actions/nightly-release
         with:
           go: "1.21"
-          workdir: src/github.com/nats-io/nats-server
+          workdir: src/github.com/tiiuae/nats-server
           label: nightly
           hub_username: "${{ secrets.DOCKER_USERNAME }}"
           hub_password: "${{ secrets.DOCKER_PASSWORD }}"

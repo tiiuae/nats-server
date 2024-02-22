@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/nats-io/nats-server/v2/server"
+	"github.com/tiiuae/nats-server/v2/server"
 	"go.uber.org/automaxprocs/maxprocs"
 )
 

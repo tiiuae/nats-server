@@ -35,7 +35,7 @@ import (
 
 	"github.com/klauspost/compress/s2"
 	"github.com/nats-io/jwt/v2"
-	"github.com/nats-io/nats-server/v2/internal/fastrand"
+	"github.com/tiiuae/nats-server/v2/internal/fastrand"
 )
 
 // Type of client connection.
@@ -5743,7 +5743,7 @@ func (c *client) doTLSHandshake(typ string, solicit bool, url *url.URL, tlsConfi
 	if err = conn.Handshake(); err != nil {
 		if solicit {
 			// Based on type of error, possibly clear the saved tlsName
-			// See: https://github.com/nats-io/nats-server/issues/1256
+			// See: https://github.com/tiiuae/nats-server/issues/1256
 			// NOTE: As of Go 1.20, the HostnameError is wrapped so cannot
 			// type assert to check directly.
 			var hostnameErr x509.HostnameError

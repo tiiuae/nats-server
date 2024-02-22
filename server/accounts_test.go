@@ -931,7 +931,7 @@ func TestSimpleMapping(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/1159
+// https://github.com/tiiuae/nats-server/issues/1159
 func TestStreamImportLengthBug(t *testing.T) {
 	s, fooAcc, barAcc := simpleAccountServer(t)
 	defer s.Shutdown()
@@ -3500,7 +3500,7 @@ func TestAccountImportOwnExport(t *testing.T) {
 
 // Test for a bug that would cause duplicate deliveries in certain situations when
 // service export/imports and leafnodes involved.
-// https://github.com/nats-io/nats-server/issues/3191
+// https://github.com/tiiuae/nats-server/issues/3191
 func TestAccountImportDuplicateResponseDeliveryWithLeafnodes(t *testing.T) {
 	conf := createConfFile(t, []byte(`
 		port: -1
@@ -3643,7 +3643,7 @@ func TestAccountReloadServiceImportPanic(t *testing.T) {
 	})
 }
 
-// https://github.com/nats-io/nats-server/issues/4674
+// https://github.com/tiiuae/nats-server/issues/4674
 func TestAccountServiceAndStreamExportDoubleDelivery(t *testing.T) {
 	conf := createConfFile(t, []byte(`
 		listen: 127.0.0.1:-1

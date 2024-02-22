@@ -910,7 +910,7 @@ func TestJetStreamClusterStreamLagWarning(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/3603
+// https://github.com/tiiuae/nats-server/issues/3603
 func TestJetStreamClusterSignalPullConsumersOnDelete(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
@@ -957,7 +957,7 @@ func TestJetStreamClusterSignalPullConsumersOnDelete(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/3559
+// https://github.com/tiiuae/nats-server/issues/3559
 func TestJetStreamClusterSourceWithOptStartTime(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -1319,7 +1319,7 @@ func TestJetStreamClusterNoPanicOnStreamInfoWhenNoLeaderYet(t *testing.T) {
 	wg.Wait()
 }
 
-// Issue https://github.com/nats-io/nats-server/issues/3630
+// Issue https://github.com/tiiuae/nats-server/issues/3630
 func TestJetStreamClusterPullConsumerAcksExtendInactivityThreshold(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
@@ -1372,7 +1372,7 @@ func TestJetStreamClusterPullConsumerAcksExtendInactivityThreshold(t *testing.T)
 	require_Error(t, err, nats.ErrConsumerNotFound)
 }
 
-// https://github.com/nats-io/nats-server/issues/3677
+// https://github.com/tiiuae/nats-server/issues/3677
 func TestJetStreamClusterParallelStreamCreation(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
@@ -1875,7 +1875,7 @@ func TestJetStreamClusterReplacementPolicyAfterPeerRemoveNoPlace(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/3191
+// https://github.com/tiiuae/nats-server/issues/3191
 func TestJetStreamClusterLeafnodeDuplicateConsumerMessages(t *testing.T) {
 	// Cluster B
 	c := createJetStreamCluster(t, jsClusterTempl, "B", _EMPTY_, 2, 22020, false)
@@ -2388,7 +2388,7 @@ func TestJetStreamClusterLostConsumers(t *testing.T) {
 	})
 }
 
-// https://github.com/nats-io/nats-server/issues/3636
+// https://github.com/tiiuae/nats-server/issues/3636
 func TestJetStreamClusterScaleDownDuringServerOffline(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
@@ -2511,7 +2511,7 @@ func TestJetStreamClusterInterestPolicyStreamForConsumersToMatchRFactor(t *testi
 	require_Error(t, err, NewJSConsumerReplicasShouldMatchStreamError())
 }
 
-// https://github.com/nats-io/nats-server/issues/3791
+// https://github.com/tiiuae/nats-server/issues/3791
 func TestJetStreamClusterKVWatchersWithServerDown(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
@@ -2849,7 +2849,7 @@ func TestJetStreamClusterWALBuildupOnNoOpPull(t *testing.T) {
 	}
 }
 
-// Found in https://github.com/nats-io/nats-server/issues/3848
+// Found in https://github.com/tiiuae/nats-server/issues/3848
 // When Max Age was specified and stream was scaled up, new replicas
 // were expiring messages much later than the leader.
 func TestJetStreamClusterStreamMaxAgeScaleUp(t *testing.T) {
@@ -2985,7 +2985,7 @@ func TestJetStreamClusterWorkQueueConsumerReplicatedAfterScaleUp(t *testing.T) {
 	require_NotNil(t, o.raftNode())
 }
 
-// https://github.com/nats-io/nats-server/issues/3953
+// https://github.com/tiiuae/nats-server/issues/3953
 func TestJetStreamClusterWorkQueueAfterScaleUp(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
@@ -4031,7 +4031,7 @@ func TestJetStreamClusterStreamScaleUpNoGroupCluster(t *testing.T) {
 	require_NoError(t, err)
 }
 
-// https://github.com/nats-io/nats-server/issues/4162
+// https://github.com/tiiuae/nats-server/issues/4162
 func TestJetStreamClusterStaleDirectGetOnRestart(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "NATS", 3)
 	defer c.shutdown()
@@ -4303,7 +4303,7 @@ func TestJetStreamClusterLeafnodePlusDaisyChainSetup(t *testing.T) {
 	})
 }
 
-// https://github.com/nats-io/nats-server/pull/4197
+// https://github.com/tiiuae/nats-server/pull/4197
 func TestJetStreamClusterPurgeExReplayAfterRestart(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "P3F", 3)
 	defer c.shutdown()
@@ -5827,7 +5827,7 @@ func TestJetStreamClusterRestartThenScaleStreamReplicas(t *testing.T) {
 	wg.Wait()
 }
 
-// https://github.com/nats-io/nats-server/issues/4732
+// https://github.com/tiiuae/nats-server/issues/4732
 func TestJetStreamClusterStreamLimitsOnScaleUpAndMove(t *testing.T) {
 	tmpl := `
 			listen: 127.0.0.1:-1
@@ -6520,7 +6520,7 @@ Setup:
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/5071
+// https://github.com/tiiuae/nats-server/issues/5071
 func TestJetStreamClusterStreamPlacementDistribution(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 5)
 	defer c.shutdown()

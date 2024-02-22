@@ -2189,7 +2189,7 @@ func TestJetStreamClusterInterestRetention(t *testing.T) {
 	waitForZero()
 }
 
-// https://github.com/nats-io/nats-server/issues/2243
+// https://github.com/tiiuae/nats-server/issues/2243
 func TestJetStreamClusterWorkQueueRetention(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()

@@ -28,7 +28,7 @@ import (
 
 	"golang.org/x/crypto/ocsp"
 
-	"github.com/nats-io/nats-server/v2/server"
+	"github.com/tiiuae/nats-server/v2/server"
 	"github.com/tiiuae/nats.go"
 )
 

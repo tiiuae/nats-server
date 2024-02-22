@@ -2255,7 +2255,7 @@ func (s *Server) updateRouteSubscriptionMap(acc *Account, sub *subscription, del
 		// Not required for code correctness, but helps reduce the number of
 		// updates sent to the routes when processing high number of concurrent
 		// queue subscriptions updates (sub/unsub).
-		// See https://github.com/nats-io/nats-server/pull/1126 for more details.
+		// See https://github.com/tiiuae/nats-server/pull/1126 for more details.
 		if isq {
 			acc.sqmu.Lock()
 		}

@@ -3287,7 +3287,7 @@ func TestServerEventsFilteredByTag(t *testing.T) {
 	require_Len(t, len(msgs), 0)
 }
 
-// https://github.com/nats-io/nats-server/issues/3177
+// https://github.com/tiiuae/nats-server/issues/3177
 func TestServerEventsAndDQSubscribers(t *testing.T) {
 	c := createJetStreamClusterWithTemplate(t, jsClusterAccountsTempl, "DDQ", 3)
 	defer c.shutdown()

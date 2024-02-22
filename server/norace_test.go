@@ -48,9 +48,9 @@ import (
 
 	"github.com/klauspost/compress/s2"
 	"github.com/nats-io/jwt/v2"
-	"github.com/nats-io/nats-server/v2/server/avl"
 	"github.com/nats-io/nkeys"
 	"github.com/nats-io/nuid"
+	"github.com/tiiuae/nats-server/v2/server/avl"
 	"github.com/tiiuae/nats.go"
 )
 
@@ -4088,7 +4088,7 @@ func TestNoRaceJetStreamMemstoreWithLargeInteriorDeletes(t *testing.T) {
 
 // This is related to an issue reported where we were exhausting threads by trying to
 // cleanup too many consumers at the same time.
-// https://github.com/nats-io/nats-server/issues/2742
+// https://github.com/tiiuae/nats-server/issues/2742
 func TestNoRaceJetStreamConsumerFileStoreConcurrentDiskIO(t *testing.T) {
 	storeDir := t.TempDir()
 
@@ -5653,7 +5653,7 @@ func TestNoRaceJetStreamSuperClusterStreamMoveLongRTT(t *testing.T) {
 	})
 }
 
-// https://github.com/nats-io/nats-server/issues/3455
+// https://github.com/tiiuae/nats-server/issues/3455
 func TestNoRaceJetStreamConcurrentPullConsumerBatch(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -5790,7 +5790,7 @@ func TestNoRaceJetStreamManyPullConsumersNeedAckOptimization(t *testing.T) {
 	last.AckSync()
 }
 
-// https://github.com/nats-io/nats-server/issues/3499
+// https://github.com/tiiuae/nats-server/issues/3499
 func TestNoRaceJetStreamDeleteConsumerWithInterestStreamAndHighSeqs(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
