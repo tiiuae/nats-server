@@ -431,7 +431,7 @@ func (c *client) processRoutedMsgArgs(arg []byte) error {
 	return nil
 }
 
-// processInboundRouteMsg is called to process an inbound msg from a route.
+// processInboundRoutedMsg is called to process an inbound msg from a route.
 func (c *client) processInboundRoutedMsg(msg []byte) {
 	// Update statistics
 	c.in.msgs++
@@ -628,7 +628,7 @@ func (c *client) processRouteInfo(info *Info) {
 					info.Gateway, remoteID)
 				return
 			}
-			s.processGatewayInfoFromRoute(info, remoteID, c)
+			s.processGatewayInfoFromRoute(info, remoteID)
 			return
 		}
 
@@ -927,7 +927,7 @@ func (s *Server) updateRemoteRoutePerms(c *client, info *Info) {
 		allSubs    = _allSubs[:0]
 	)
 
-	s.accounts.Range(func(_, v interface{}) bool {
+	s.accounts.Range(func(_, v any) bool {
 		acc := v.(*Account)
 		acc.mu.RLock()
 		accName, sl, accPoolIdx := acc.Name, acc.sl, acc.routePoolIdx
@@ -1162,7 +1162,7 @@ func (c *client) removeRemoteSubs() {
 	c.mu.Lock()
 	srv := c.srv
 	subs := c.subs
-	c.subs = make(map[string]*subscription)
+	c.subs = nil
 	c.mu.Unlock()
 
 	for key, sub := range subs {
@@ -1576,7 +1576,7 @@ func (s *Server) sendSubsToRoute(route *client, idx int, account string) {
 			a.mu.RUnlock()
 		}
 	} else {
-		s.accounts.Range(func(k, v interface{}) bool {
+		s.accounts.Range(func(k, v any) bool {
 			a := v.(*Account)
 			a.mu.RLock()
 			// We are here for regular or pooled routes (not per-account).

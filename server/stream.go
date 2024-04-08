@@ -268,6 +268,7 @@ type stream struct {
 	sch   chan struct{}
 	sigq  *ipQueue[*cMsg]
 	csl   *Sublist // Consumer Sublist
+
 	// Leader will store seq/msgTrace in clustering mode. Used in applyStreamEntries
 	// to know if trace event should be sent after processing.
 	mt map[uint64]*msgTrace
@@ -355,6 +356,7 @@ const (
 	JSSubject      = "Nats-Subject"
 	JSLastSequence = "Nats-Last-Sequence"
 	JSNumPending   = "Nats-Num-Pending"
+	JSUpToSequence = "Nats-UpTo-Sequence"
 )
 
 // Rollups, can be subject only or all messages.
@@ -858,6 +860,12 @@ func (mset *stream) setLeader(isLeader bool) error {
 		mset.leader = _EMPTY_
 	}
 	mset.mu.Unlock()
+
+	if mset.isInterestRetention() {
+		// If we are interest based make sure to check consumers.
+		// This is to make sure we process any outstanding acks.
+		mset.checkInterestState()
+	}
 	return nil
 }
 
@@ -996,9 +1004,7 @@ func (mset *stream) rebuildDedupe() {
 }
 
 func (mset *stream) lastSeqAndCLFS() (uint64, uint64) {
-	mset.mu.RLock()
-	defer mset.mu.RUnlock()
-	return mset.lseq, mset.getCLFS()
+	return mset.lastSeq(), mset.getCLFS()
 }
 
 func (mset *stream) getCLFS() uint64 {
@@ -1015,9 +1021,8 @@ func (mset *stream) setCLFS(clfs uint64) {
 
 func (mset *stream) lastSeq() uint64 {
 	mset.mu.RLock()
-	lseq := mset.lseq
-	mset.mu.RUnlock()
-	return lseq
+	defer mset.mu.RUnlock()
+	return mset.lseq
 }
 
 func (mset *stream) setLastSeq(lseq uint64) {
@@ -1289,7 +1294,7 @@ func (s *Server) checkStreamCfg(config *StreamConfig, acc *Account) (StreamConfi
 				return StreamConfig{}, NewJSMirrorInvalidSubjectFilterError()
 			}
 			for inner, innertr := range cfg.Mirror.SubjectTransforms {
-				if inner != outer && subjectIsSubsetMatch(tr.Source, innertr.Source) {
+				if inner != outer && SubjectsCollide(tr.Source, innertr.Source) {
 					return StreamConfig{}, NewJSMirrorOverlappingSubjectFiltersError()
 				}
 			}
@@ -2224,7 +2229,7 @@ func (mset *stream) processInboundMirrorMsg(m *inMsg) bool {
 		var needsRetry bool
 		// Flow controls have reply subjects.
 		if m.rply != _EMPTY_ {
-			mset.handleFlowControl(mset.mirror, m)
+			mset.handleFlowControl(m)
 		} else {
 			// For idle heartbeats make sure we did not miss anything and check if we are considered stalled.
 			if ldseq := parseInt64(getHeader(JSLastConsumerSeq, m.hdr)); ldseq > 0 && uint64(ldseq) != mset.mirror.dseq {
@@ -3150,7 +3155,7 @@ func (mset *stream) sendFlowControlReply(reply string) {
 
 // handleFlowControl will properly handle flow control messages for both R==1 and R>1.
 // Lock should be held.
-func (mset *stream) handleFlowControl(si *sourceInfo, m *inMsg) {
+func (mset *stream) handleFlowControl(m *inMsg) {
 	// If we are clustered we will send the flow control message through the replication stack.
 	if mset.isClustered() {
 		mset.node.Propose(encodeStreamMsg(_EMPTY_, m.rply, m.hdr, nil, 0, 0))
@@ -3186,7 +3191,7 @@ func (mset *stream) processInboundSourceMsg(si *sourceInfo, m *inMsg) bool {
 		var needsRetry bool
 		// Flow controls have reply subjects.
 		if m.rply != _EMPTY_ {
-			mset.handleFlowControl(si, m)
+			mset.handleFlowControl(m)
 		} else {
 			// For idle heartbeats make sure we did not miss anything.
 			if ldseq := parseInt64(getHeader(JSLastConsumerSeq, m.hdr)); ldseq > 0 && uint64(ldseq) != si.dseq {
@@ -3238,6 +3243,9 @@ func (mset *stream) processInboundSourceMsg(si *sourceInfo, m *inMsg) bool {
 	// If we are daisy chained here make sure to remove the original one.
 	if len(hdr) > 0 {
 		hdr = removeHeaderIfPresent(hdr, JSStreamSource)
+
+		// Remove any Nats-Expected- headers as we don't want to validate them.
+		hdr = removeHeaderIfPrefixPresent(hdr, "Nats-Expected-")
 	}
 	// Hold onto the origin reply which has all the metadata.
 	hdr = genHeader(hdr, JSStreamSource, si.genSourceHeader(m.rply))
@@ -3982,6 +3990,12 @@ func (mset *stream) isClustered() bool {
 	return mset.node != nil
 }
 
+// Return if any limits are set.
+// Lock should be held.
+func (mset *stream) hasLimitsSet() bool {
+	return mset.cfg.MaxMsgs > 0 || mset.cfg.MaxBytes > 0 || mset.cfg.MaxMsgsPer > 0 || mset.cfg.MaxAge > 0
+}
+
 // Used if we have to queue things internally to avoid the route/gw path.
 type inMsg struct {
 	subj string
@@ -3996,7 +4010,7 @@ func (mset *stream) queueInbound(ib *ipQueue[*inMsg], subj, rply string, hdr, ms
 }
 
 var dgPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		return &directGetReq{}
 	},
 }
@@ -4027,16 +4041,21 @@ func (mset *stream) processDirectGetRequest(_ *subscription, c *client, _ *Accou
 		return
 	}
 	// Check if nothing set.
-	if req.Seq == 0 && req.LastFor == _EMPTY_ && req.NextFor == _EMPTY_ {
+	if req.Seq == 0 && req.LastFor == _EMPTY_ && req.NextFor == _EMPTY_ && len(req.MultiLastFor) == 0 && req.StartTime == nil {
 		hdr := []byte("NATS/1.0 408 Empty Request\r\n\r\n")
 		mset.outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, hdr, nil, nil, 0))
 		return
 	}
-	// Check that we do not have both options set.
+	// Check we don't have conflicting options set.
 	// We do not allow batch mode for lastFor requests.
 	if (req.Seq > 0 && req.LastFor != _EMPTY_) ||
+		(req.Seq > 0 && req.StartTime != nil) ||
+		(req.StartTime != nil && req.LastFor != _EMPTY_) ||
 		(req.LastFor != _EMPTY_ && req.NextFor != _EMPTY_) ||
-		(req.LastFor != _EMPTY_ && req.Batch > 0) {
+		(req.LastFor != _EMPTY_ && req.Batch > 0) ||
+		(req.LastFor != _EMPTY_ && len(req.MultiLastFor) > 0) ||
+		(req.NextFor != _EMPTY_ && len(req.MultiLastFor) > 0) ||
+		(req.UpToSeq > 0 && req.UpToTime != nil) {
 		hdr := []byte("NATS/1.0 408 Bad Request\r\n\r\n")
 		mset.outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, hdr, nil, nil, 0))
 		return
@@ -4095,14 +4114,139 @@ func (mset *stream) processDirectGetLastBySubjectRequest(_ *subscription, c *cli
 	}
 }
 
+// For direct get batch and multi requests.
+const (
+	dg   = "NATS/1.0\r\nNats-Stream: %s\r\nNats-Subject: %s\r\nNats-Sequence: %d\r\nNats-Time-Stamp: %s\r\n\r\n"
+	dgb  = "NATS/1.0\r\nNats-Stream: %s\r\nNats-Subject: %s\r\nNats-Sequence: %d\r\nNats-Time-Stamp: %s\r\nNats-Num-Pending: %d\r\nNats-Last-Sequence: %d\r\n\r\n"
+	eob  = "NATS/1.0 204 EOB\r\nNats-Num-Pending: %d\r\nNats-Last-Sequence: %d\r\n\r\n"
+	eobm = "NATS/1.0 204 EOB\r\nNats-Num-Pending: %d\r\nNats-Last-Sequence: %d\r\nNats-UpTo-Sequence: %d\r\n\r\n"
+)
+
+// Handle a multi request.
+func (mset *stream) getDirectMulti(req *JSApiMsgGetRequest, reply string) {
+	// TODO(dlc) - Make configurable?
+	const maxAllowedResponses = 1024
+
+	// We hold the lock here to try to avoid changes out from underneath of us.
+	mset.mu.RLock()
+	defer mset.mu.RUnlock()
+	// Grab store and name.
+	store, name, s := mset.store, mset.cfg.Name, mset.srv
+
+	// Grab MaxBytes
+	mb := req.MaxBytes
+	if mb == 0 && s != nil {
+		// Fill in with the server's MaxPending.
+		mb = int(s.opts.MaxPending)
+	}
+
+	upToSeq := req.UpToSeq
+	// If we have UpToTime set get the proper sequence.
+	if req.UpToTime != nil {
+		upToSeq = store.GetSeqFromTime((*req.UpToTime).UTC())
+		// We need to back off one since this is used to determine start sequence normally,
+		// were as here we want it to be the ceiling.
+		upToSeq--
+	}
+	// If not set, set to the last sequence and remember that for EOB.
+	if upToSeq == 0 {
+		var state StreamState
+		mset.store.FastState(&state)
+		upToSeq = state.LastSeq
+	}
+
+	seqs, err := store.MultiLastSeqs(req.MultiLastFor, upToSeq, maxAllowedResponses)
+	if err != nil {
+		var hdr []byte
+		if err == ErrTooManyResults {
+			hdr = []byte("NATS/1.0 413 Too Many Results\r\n\r\n")
+		} else {
+			hdr = []byte(fmt.Sprintf("NATS/1.0 500 %v\r\n\r\n", err))
+		}
+		mset.outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, hdr, nil, nil, 0))
+		return
+	}
+	if len(seqs) == 0 {
+		hdr := []byte("NATS/1.0 404 No Results\r\n\r\n")
+		mset.outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, hdr, nil, nil, 0))
+		return
+	}
+
+	np, lseq, sentBytes, sent := uint64(len(seqs)-1), uint64(0), 0, 0
+	for _, seq := range seqs {
+		if seq < req.Seq {
+			if np > 0 {
+				np--
+			}
+			continue
+		}
+		var svp StoreMsg
+		sm, err := store.LoadMsg(seq, &svp)
+		if err != nil {
+			hdr := []byte("NATS/1.0 404 Message Not Found\r\n\r\n")
+			mset.outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, hdr, nil, nil, 0))
+			return
+		}
+
+		hdr := sm.hdr
+		ts := time.Unix(0, sm.ts).UTC()
+
+		if len(hdr) == 0 {
+			hdr = fmt.Appendf(nil, dgb, name, sm.subj, sm.seq, ts.Format(time.RFC3339Nano), np, lseq)
+		} else {
+			hdr = copyBytes(hdr)
+			hdr = genHeader(hdr, JSStream, name)
+			hdr = genHeader(hdr, JSSubject, sm.subj)
+			hdr = genHeader(hdr, JSSequence, strconv.FormatUint(sm.seq, 10))
+			hdr = genHeader(hdr, JSTimeStamp, ts.Format(time.RFC3339Nano))
+			hdr = genHeader(hdr, JSNumPending, strconv.FormatUint(np, 10))
+			hdr = genHeader(hdr, JSLastSequence, strconv.FormatUint(lseq, 10))
+		}
+		// Decrement num pending. This is optimization and we do not continue to look it up for these operations.
+		if np > 0 {
+			np--
+		}
+		// Track our lseq
+		lseq = sm.seq
+		// Send out our message.
+		mset.outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, hdr, sm.msg, nil, 0))
+		// Check if we have exceeded max bytes.
+		sentBytes += len(sm.subj) + len(sm.hdr) + len(sm.msg)
+		if sentBytes >= mb {
+			break
+		}
+		sent++
+		if req.Batch > 0 && sent >= req.Batch {
+			break
+		}
+	}
+
+	// Send out EOB
+	hdr := fmt.Appendf(nil, eobm, np, lseq, upToSeq)
+	mset.outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, hdr, nil, nil, 0))
+}
+
 // Do actual work on a direct msg request.
 // This could be called in a Go routine if we are inline for a non-client connection.
 func (mset *stream) getDirectRequest(req *JSApiMsgGetRequest, reply string) {
+	// Handle multi in separate function.
+	if len(req.MultiLastFor) > 0 {
+		mset.getDirectMulti(req, reply)
+		return
+	}
+
 	mset.mu.RLock()
 	store, name, s := mset.store, mset.cfg.Name, mset.srv
 	mset.mu.RUnlock()
 
-	seq := req.Seq
+	var seq uint64
+	// Lookup start seq if AsOfTime is set.
+	if req.StartTime != nil {
+		seq = store.GetSeqFromTime(*req.StartTime)
+	} else {
+		seq = req.Seq
+	}
+
 	wc := subjectHasWildcard(req.NextFor)
 	// For tracking num pending if we are batch.
 	var np, lseq, validThrough uint64
@@ -4204,7 +4348,7 @@ func (mset *stream) getDirectRequest(req *JSApiMsgGetRequest, reply string) {
 		if mset.lastSeq() > validThrough {
 			np, _ = store.NumPending(seq, req.NextFor, false)
 		}
-		hdr := fmt.Appendf(nil, "NATS/1.0 204 EOB\r\nNats-Num-Pending: %d\r\nNats-Last-Sequence: %d\r\n\r\n", np, lseq)
+		hdr := fmt.Appendf(nil, eob, np, lseq)
 		mset.outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, hdr, nil, nil, 0))
 	}
 }
@@ -4224,7 +4368,7 @@ func (mset *stream) processInboundJetStreamMsg(_ *subscription, c *client, _ *Ac
 		// to prevent a trace event to be generated when a stored message
 		// is delivered to a consumer and routed.
 		if !traceOnly {
-			mt.disableTraceHeaders(c, hdr)
+			disableTraceHeaders(c, hdr)
 		}
 		// This will add the jetstream event while in the client read loop.
 		// Since the event will be updated in a different go routine, the
@@ -4265,7 +4409,9 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		if traceOnly {
 			return
 		}
+		mset.clMu.Lock()
 		mset.clfs++
+		mset.clMu.Unlock()
 	}
 
 	// Apply the input subject transform if any
@@ -4296,8 +4442,8 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 	// Bail here if sealed.
 	if isSealed {
 		outq := mset.outq
-		bumpCLFS()
 		mset.mu.Unlock()
+		bumpCLFS()
 		if canRespond && outq != nil {
 			resp.PubAck = &PubAck{Stream: name}
 			resp.Error = ApiErrors[JSStreamSealedErr]
@@ -4364,8 +4510,8 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		if !isClustered || traceOnly {
 			// Expected stream.
 			if sname := getExpectedStream(hdr); sname != _EMPTY_ && sname != name {
-				bumpCLFS()
 				mset.mu.Unlock()
+				bumpCLFS()
 				if canRespond {
 					resp.PubAck = &PubAck{Stream: name}
 					resp.Error = NewJSStreamNotMatchError()
@@ -4379,8 +4525,8 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		// Dedupe detection.
 		if msgId = getMsgId(hdr); msgId != _EMPTY_ {
 			if dde := mset.checkMsgId(msgId); dde != nil {
-				bumpCLFS()
 				mset.mu.Unlock()
+				bumpCLFS()
 				if canRespond {
 					response := append(pubAck, strconv.FormatUint(dde.seq, 10)...)
 					response = append(response, ",\"duplicate\": true}"...)
@@ -4403,8 +4549,8 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 				fseq, err = 0, nil
 			}
 			if err != nil || fseq != seq {
-				bumpCLFS()
 				mset.mu.Unlock()
+				bumpCLFS()
 				if canRespond {
 					resp.PubAck = &PubAck{Stream: name}
 					resp.Error = NewJSStreamWrongLastSequenceError(fseq)
@@ -4418,8 +4564,8 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		// Expected last sequence.
 		if seq, exists := getExpectedLastSeq(hdr); exists && seq != mset.lseq {
 			mlseq := mset.lseq
-			bumpCLFS()
 			mset.mu.Unlock()
+			bumpCLFS()
 			if canRespond {
 				resp.PubAck = &PubAck{Stream: name}
 				resp.Error = NewJSStreamWrongLastSequenceError(mlseq)
@@ -4435,8 +4581,8 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 			}
 			if lmsgId != mset.lmsgId {
 				last := mset.lmsgId
-				bumpCLFS()
 				mset.mu.Unlock()
+				bumpCLFS()
 				if canRespond {
 					resp.PubAck = &PubAck{Stream: name}
 					resp.Error = NewJSStreamWrongLastMsgIDError(last)
@@ -4449,8 +4595,8 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		// Check for any rollups.
 		if rollup := getRollup(hdr); rollup != _EMPTY_ {
 			if !mset.cfg.AllowRollup || mset.cfg.DenyPurge {
-				bumpCLFS()
 				mset.mu.Unlock()
+				bumpCLFS()
 				if canRespond {
 					resp.PubAck = &PubAck{Stream: name}
 					resp.Error = NewJSStreamRollupFailedError(errors.New("rollup not permitted"))
@@ -4465,8 +4611,8 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 			case JSMsgRollupAll:
 				rollupAll = true
 			default:
-				bumpCLFS()
 				mset.mu.Unlock()
+				bumpCLFS()
 				err := fmt.Errorf("rollup value invalid: %q", rollup)
 				if canRespond {
 					resp.PubAck = &PubAck{Stream: name}
@@ -4488,8 +4634,8 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 
 	// Check to see if we are over the max msg size.
 	if maxMsgSize >= 0 && (len(hdr)+len(msg)) > maxMsgSize {
-		bumpCLFS()
 		mset.mu.Unlock()
+		bumpCLFS()
 		if canRespond {
 			resp.PubAck = &PubAck{Stream: name}
 			resp.Error = NewJSStreamMessageExceedsMaximumError()
@@ -4500,8 +4646,8 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 	}
 
 	if len(hdr) > math.MaxUint16 {
-		bumpCLFS()
 		mset.mu.Unlock()
+		bumpCLFS()
 		if canRespond {
 			resp.PubAck = &PubAck{Stream: name}
 			resp.Error = NewJSStreamHeaderExceedsMaximumError()
@@ -4514,8 +4660,8 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 	// Check to see if we have exceeded our limits.
 	if js.limitsExceeded(stype) {
 		s.resourcesExceededError()
-		bumpCLFS()
 		mset.mu.Unlock()
+		bumpCLFS()
 		if canRespond {
 			resp.PubAck = &PubAck{Stream: name}
 			resp.Error = NewJSInsufficientResourcesError()
@@ -4642,8 +4788,8 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		mset.store.FastState(&state)
 		mset.lseq = state.LastSeq
 		mset.lmsgId = olmsgId
-		bumpCLFS()
 		mset.mu.Unlock()
+		bumpCLFS()
 
 		switch err {
 		case ErrMaxMsgs, ErrMaxBytes, ErrMaxMsgsPerSubject, ErrMsgTooLarge:
@@ -5097,9 +5243,7 @@ func (mset *stream) stop(deleteFlag, advisory bool) error {
 	accName := jsa.account.Name
 	jsa.mu.Unlock()
 
-	// Mark as closed, kick monitor and collect consumers first.
-	mset.closed.Store(true)
-
+	// Kick monitor and collect consumers first.
 	mset.mu.Lock()
 	// Signal to the monitor loop.
 	// Can't use qch here.
@@ -5160,6 +5304,9 @@ func (mset *stream) stop(deleteFlag, advisory bool) error {
 	if deleteFlag && advisory {
 		mset.sendDeleteAdvisoryLocked()
 	}
+
+	// Mark closed.
+	mset.closed.Store(true)
 
 	// Quit channel, do this after sending the delete advisory
 	if mset.qch != nil {
@@ -5291,6 +5438,91 @@ func (mset *stream) getPublicConsumers() []*consumer {
 	return obs
 }
 
+// Will check for interest retention and make sure messages
+// that have been acked are processed and removed.
+// This will check the ack floors of all consumers, and adjust our first sequence accordingly.
+func (mset *stream) checkInterestState() {
+	if mset == nil {
+		return
+	}
+	if !mset.isInterestRetention() {
+		// If we are limits based nothing to do.
+		return
+	}
+
+	mset.clsMu.RLock()
+	var zeroAcks []*consumer
+	var lowAckFloor uint64 = math.MaxUint64
+	for _, o := range mset.cList {
+		o.mu.RLock()
+		if o.isLeader() {
+			// We need to account for consumers with ack floor of zero.
+			// We will collect them and see if we need to check pending below.
+			if o.asflr == 0 {
+				zeroAcks = append(zeroAcks, o)
+			} else if o.asflr < lowAckFloor {
+				lowAckFloor = o.asflr
+			}
+		} else {
+			// We are a follower so only have the store state, so read that in.
+			state, err := o.store.State()
+			if err != nil {
+				// On error we will not have enough information to process correctly so bail.
+				o.mu.RUnlock()
+				mset.clsMu.RUnlock()
+				return
+			}
+			// We need to account for consumers with ack floor of zero.
+			if state.AckFloor.Stream == 0 {
+				zeroAcks = append(zeroAcks, o)
+			} else if state.AckFloor.Stream < lowAckFloor {
+				lowAckFloor = state.AckFloor.Stream
+			}
+			// We are a follower here but if we detect a drift from when we were previous leader correct here.
+			if o.asflr > state.AckFloor.Stream || o.sseq > state.Delivered.Stream+1 {
+				o.applyState(state)
+			}
+		}
+		o.mu.RUnlock()
+	}
+	mset.clsMu.RUnlock()
+
+	// If nothing was set we can bail.
+	if lowAckFloor == math.MaxUint64 {
+		return
+	}
+
+	// Hold stream write lock in case we need to purge.
+	mset.mu.Lock()
+	defer mset.mu.Unlock()
+
+	// Capture our current state.
+	var state StreamState
+	mset.store.FastState(&state)
+
+	if lowAckFloor < math.MaxUint64 && lowAckFloor > state.FirstSeq {
+		// Check if we had any zeroAcks, we will need to check them.
+		for _, o := range zeroAcks {
+			var np uint64
+			o.mu.RLock()
+			if o.isLeader() {
+				np = uint64(o.numPending())
+			} else {
+				np, _ = o.calculateNumPending()
+			}
+			o.mu.RUnlock()
+			// This means we have pending and can not remove anything at this time.
+			if np > 0 {
+				return
+			}
+		}
+		// Purge the stream to lowest ack floor + 1
+		mset.store.PurgeEx(_EMPTY_, lowAckFloor+1, 0)
+		// Also make sure we clear any pending acks.
+		mset.clearAllPreAcksBelowFloor(lowAckFloor + 1)
+	}
+}
+
 func (mset *stream) isInterestRetention() bool {
 	mset.mu.RLock()
 	defer mset.mu.RUnlock()
@@ -5379,6 +5611,7 @@ func (mset *stream) swapSigSubs(o *consumer, newFilters []string) {
 
 	if o.closed || o.mset == nil {
 		o.mu.Unlock()
+		mset.clsMu.Unlock()
 		return
 	}
 
@@ -5478,8 +5711,6 @@ func (mset *stream) Store() StreamStore {
 // Lock should be held.
 func (mset *stream) partitionUnique(name string, partitions []string) bool {
 	for _, partition := range partitions {
-		psa := [32]string{}
-		pts := tokenizeSubjectIntoSlice(psa[:0], partition)
 		for n, o := range mset.consumers {
 			// Skip the consumer being checked.
 			if n == name {
@@ -5489,8 +5720,7 @@ func (mset *stream) partitionUnique(name string, partitions []string) bool {
 				return false
 			}
 			for _, filter := range o.subjf {
-				if isSubsetMatchTokenized(pts, filter.tokenizedSubject) ||
-					isSubsetMatchTokenized(filter.tokenizedSubject, pts) {
+				if SubjectsCollide(partition, filter.subject) {
 					return false
 				}
 			}
@@ -5653,19 +5883,22 @@ func (mset *stream) ackMsg(o *consumer, seq uint64) {
 		return
 	}
 
+	store := mset.store
 	var state StreamState
-	mset.store.FastState(&state)
-
-	// Make sure this sequence is not below our first sequence.
-	if seq < state.FirstSeq {
-		mset.clearPreAck(o, seq)
-		mset.mu.Unlock()
-		return
-	}
+	store.FastState(&state)
 
 	// If this has arrived before we have processed the message itself.
 	if seq > state.LastSeq {
 		mset.registerPreAck(o, seq)
+		mset.mu.Unlock()
+		return
+	}
+
+	// Always clear pre-ack if here.
+	mset.clearPreAck(o, seq)
+
+	// Make sure this sequence is not below our first sequence.
+	if seq < state.FirstSeq {
 		mset.mu.Unlock()
 		return
 	}
@@ -5687,7 +5920,7 @@ func (mset *stream) ackMsg(o *consumer, seq uint64) {
 	}
 
 	// If we are here we should attempt to remove.
-	if _, err := mset.store.RemoveMsg(seq); err == ErrStoreEOF {
+	if _, err := store.RemoveMsg(seq); err == ErrStoreEOF {
 		// This should not happen, but being pedantic.
 		mset.registerPreAckLock(o, seq)
 	}

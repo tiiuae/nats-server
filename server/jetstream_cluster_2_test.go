@@ -577,7 +577,7 @@ func TestJetStreamClusterSingleLeafNodeWithoutSharedSystemAccount(t *testing.T) 
 	// Check behavior of the account without JS.
 	// Normally this should fail since our local account is not enabled. However, since we are bridging
 	// via the leafnode we expect this to work here.
-	nc, js := jsClientConnectEx(t, ln, "CORE", nats.UserInfo("n", "p"))
+	nc, js := jsClientConnectEx(t, ln, []nats.JSOpt{nats.Domain("CORE")}, nats.UserInfo("n", "p"))
 	defer nc.Close()
 
 	si, err := js.AddStream(&nats.StreamConfig{
@@ -6218,7 +6218,7 @@ func TestJetStreamClusterStreamResetOnExpirationDuringPeerDownAndRestartWithLead
 	nsl.Shutdown()
 
 	// Wait for all messages to expire.
-	checkFor(t, 2*time.Second, 20*time.Millisecond, func() error {
+	checkFor(t, 5*time.Second, time.Second, func() error {
 		si, err := js.StreamInfo("TEST")
 		require_NoError(t, err)
 		if si.State.Msgs == 0 {
@@ -6767,7 +6767,7 @@ type captureCatchupWarnLogger struct {
 	ch chan string
 }
 
-func (l *captureCatchupWarnLogger) Warnf(format string, args ...interface{}) {
+func (l *captureCatchupWarnLogger) Warnf(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	if strings.Contains(msg, "simulate error") {
 		select {
