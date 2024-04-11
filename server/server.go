@@ -166,60 +166,62 @@ type Server struct {
 	pinnedAccFail uint64
 	stats
 	scStats
-	mu                  sync.RWMutex
-	reloadMu            sync.RWMutex // Write-locked when a config reload is taking place ONLY
-	kp                  nkeys.KeyPair
-	xkp                 nkeys.KeyPair
-	xpub                string
-	info                Info
-	configFile          string
-	optsMu              sync.RWMutex
-	opts                *Options
-	running             atomic.Bool
-	shutdown            atomic.Bool
-	listener            net.Listener
-	listenerErr         error
-	gacc                *Account
-	sys                 *internal
-	js                  atomic.Pointer[jetStream]
-	isMetaLeader        atomic.Bool
-	accounts            sync.Map
-	tmpAccounts         sync.Map // Temporarily stores accounts that are being built
-	activeAccounts      int32
-	accResolver         AccountResolver
-	clients             map[uint64]*client
-	routes              map[string][]*client
-	routesPoolSize      int                           // Configured pool size
-	routesReject        bool                          // During reload, we may want to reject adding routes until some conditions are met
-	routesNoPool        int                           // Number of routes that don't use pooling (connecting to older server for instance)
-	accRoutes           map[string]map[string]*client // Key is account name, value is key=remoteID/value=route connection
-	accRouteByHash      sync.Map                      // Key is account name, value is nil or a pool index
-	accAddedCh          chan struct{}
-	accAddedReqID       string
-	leafs               map[uint64]*client
-	users               map[string]*User
-	nkeys               map[string]*NkeyUser
-	totalClients        uint64
-	closed              *closedRingBuffer
-	done                chan bool
-	start               time.Time
-	http                net.Listener
-	httpHandler         http.Handler
-	httpBasePath        string
-	profiler            net.Listener
-	httpReqStats        map[string]uint64
-	routeListener       net.Listener
-	routeListenerErr    error
-	routeInfo           Info
-	routeResolver       netResolver
-	routesToSelf        map[string]struct{}
-	routeTLSName        string
-	leafNodeListener    net.Listener
-	leafNodeListenerErr error
-	leafNodeInfo        Info
-	leafNodeInfoJSON    []byte
-	leafURLsMap         refCountedUrlSet
-	leafNodeOpts        struct {
+	mu                      sync.RWMutex
+	reloadMu                sync.RWMutex // Write-locked when a config reload is taking place ONLY
+	kp                      nkeys.KeyPair
+	xkp                     nkeys.KeyPair
+	xpub                    string
+	info                    Info
+	configFile              string
+	optsMu                  sync.RWMutex
+	opts                    *Options
+	running                 atomic.Bool
+	shutdown                atomic.Bool
+	listener                net.Listener
+	listenerErr             error
+	gacc                    *Account
+	sys                     *internal
+	js                      atomic.Pointer[jetStream]
+	isMetaLeader            atomic.Bool
+	accounts                sync.Map
+	tmpAccounts             sync.Map // Temporarily stores accounts that are being built
+	activeAccounts          int32
+	accResolver             AccountResolver
+	clients                 map[uint64]*client
+	routes                  map[string][]*client
+	routesPoolSize          int                           // Configured pool size
+	routesReject            bool                          // During reload, we may want to reject adding routes until some conditions are met
+	routesNoPool            int                           // Number of routes that don't use pooling (connecting to older server for instance)
+	accRoutes               map[string]map[string]*client // Key is account name, value is key=remoteID/value=route connection
+	accRouteByHash          sync.Map                      // Key is account name, value is nil or a pool index
+	accAddedCh              chan struct{}
+	accAddedReqID           string
+	leafs                   map[uint64]*client
+	users                   map[string]*User
+	nkeys                   map[string]*NkeyUser
+	totalClients            uint64
+	closed                  *closedRingBuffer
+	done                    chan bool
+	start                   time.Time
+	http                    net.Listener
+	httpHandler             http.Handler
+	httpBasePath            string
+	profiler                net.Listener
+	httpReqStats            map[string]uint64
+	routeListener           net.Listener
+	routeListenerErr        error
+	routeInfo               Info
+	routeResolver           netResolver
+	routesToSelf            map[string]struct{}
+	routeTLSName            string
+	leafNodeListener        net.Listener
+	leafNodeListenerErr     error
+	leafNodeQUICListener    net.Listener
+	leafNodeQUICListenerErr error
+	leafNodeInfo            Info
+	leafNodeInfoJSON        []byte
+	leafURLsMap             refCountedUrlSet
+	leafNodeOpts            struct {
 		resolver    netResolver
 		dialTimeout time.Duration
 	}
@@ -2546,6 +2548,13 @@ func (s *Server) Shutdown() {
 		doneExpected++
 		s.leafNodeListener.Close()
 		s.leafNodeListener = nil
+	}
+
+	// Kick QUIC leafnodes AcceptLoop()
+	if s.leafNodeQUICListener != nil {
+		doneExpected++
+		s.leafNodeQUICListener.Close()
+		s.leafNodeQUICListener = nil
 	}
 
 	// Kick route AcceptLoop()

@@ -163,6 +163,8 @@ type LeafNodeOpts struct {
 	NoAdvertise       bool          `json:"-"`
 	ReconnectInterval time.Duration `json:"-"`
 
+	EnableQUIC bool `json:"-"`
+
 	// Compression options
 	Compression CompressionOpts `json:"-"`
 
@@ -2340,6 +2342,8 @@ func parseLeafNodes(v any, opts *Options, errors *[]error, warnings *[]error) er
 			opts.LeafNode.Remotes = remotes
 		case "reconnect", "reconnect_delay", "reconnect_interval":
 			opts.LeafNode.ReconnectInterval = parseDuration("reconnect", tk, mv, errors, warnings)
+		case "enable_quic":
+			opts.LeafNode.EnableQUIC = mv.(bool)
 		case "tls":
 			tc, err := parseTLS(tk, true)
 			if err != nil {
@@ -5037,9 +5041,9 @@ func parseQUIC(v interface{}, o *Options, errors *[]error, warnings *[]error) er
 			}
 		}
 	}
-	o.QUIC.QUICConfig = &quic.Config{
-		HandshakeIdleTimeout: o.QUIC.HandshakeIdleTimeout,
-	}
+	o.QUIC.QUICConfig = defaultQUICConfig.Clone()
+	o.QUIC.QUICConfig.HandshakeIdleTimeout = o.QUIC.HandshakeIdleTimeout
+	o.QUIC.QUICConfig.KeepAlivePeriod = 10 * time.Second
 	return nil
 }
 

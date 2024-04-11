@@ -6,11 +6,21 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
 	"time"
 
 	"github.com/quic-go/quic-go"
 )
+
+const (
+	quicScheme     = "quic"
+	quicLeafScheme = "quic-leaf"
+)
+
+var defaultQUICConfig = &quic.Config{
+	KeepAlivePeriod: 10 * time.Second,
+}
 
 type quicConnStream struct {
 	quic.Connection
@@ -69,9 +79,6 @@ func (s *Server) startQUICServer() {
 	sopts := s.getOpts()
 	o := &sopts.QUIC
 
-	var ql quicListener
-	var err error
-
 	port := o.Port
 	if port == -1 {
 		port = 0
@@ -84,20 +91,7 @@ func (s *Server) startQUICServer() {
 	// avoid the possibility of it being "intercepted".
 
 	s.mu.Lock()
-	tlsConfig := o.TLSConfig.Clone()
-	if tlsConfig == nil {
-		s.mu.Unlock()
-		s.Fatalf("QUIC connections require TLS configuration")
-		return
-	}
-	tlsConfig.GetConfigForClient = s.quicGetTLSConfig
-	if o.QUICConfig == nil {
-		ql.Listener, err = quic.ListenAddr(hp, tlsConfig, &quic.Config{
-			HandshakeIdleTimeout: o.HandshakeIdleTimeout,
-		})
-	} else {
-		ql.Listener, err = quic.ListenAddr(hp, tlsConfig, o.QUICConfig.Clone())
-	}
+	ql, err := s.quicListen(hp, o.TLSConfig.Clone(), o)
 	s.quic.listenerErr = err
 	if err != nil {
 		s.mu.Unlock()
@@ -116,9 +110,7 @@ func (s *Server) startQUICServer() {
 		s.mu.Unlock()
 		return
 	}
-	// TODO: add support for leaf connections
-	// hasLeaf := sopts.LeafNode.Port != 0
-	go s.acceptConnections(&ql, "QUIC", func(conn net.Conn) {
+	go s.acceptConnections(ql, "QUIC", func(conn net.Conn) {
 		s.createQUICClient(conn)
 	}, func(err error) bool {
 		if s.isLameDuckMode() {
@@ -130,31 +122,27 @@ func (s *Server) startQUICServer() {
 		}
 		return false
 	})
-	// mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-	// 	res, err := s.wsUpgrade(w, r)
-	// 	if err != nil {
-	// 		s.Errorf(err.Error())
-	// 		return
-	// 	}
-	// 	switch res.kind {
-	// 	case CLIENT:
-	// 		s.createWSClient(res.conn, res.ws)
-	// 	case MQTT:
-	// 		s.createMQTTClient(res.conn, res.ws)
-	// 	case LEAF:
-	// 		if !hasLeaf {
-	// 			s.Errorf("Not configured to accept leaf node connections")
-	// 			// Silently close for now. If we want to send an error back, we would
-	// 			// need to create the leafnode client anyway, so that is is handling websocket
-	// 			// frames, then send the error to the remote.
-	// 			res.conn.Close()
-	// 			return
-	// 		}
-	// 		s.createLeafNode(res.conn, nil, nil, res.ws)
-	// 	}
-	// })
-	s.quic.listener = &ql
+	s.quic.listener = ql
 	s.mu.Unlock()
+}
+
+func (s *Server) quicListen(hp string, tlsConfig *tls.Config, o *QUICOpts) (ql *quicListener, err error) {
+	if tlsConfig == nil {
+		return nil, errors.New("QUIC connections require TLS configuration")
+	}
+	ql = &quicListener{}
+	tlsConfig.GetConfigForClient = s.quicGetTLSConfig
+	if o.QUICConfig == nil {
+		ql.Listener, err = quic.ListenAddr(hp, tlsConfig, &quic.Config{
+			HandshakeIdleTimeout: o.HandshakeIdleTimeout,
+		})
+	} else {
+		ql.Listener, err = quic.ListenAddr(hp, tlsConfig, o.QUICConfig.Clone())
+	}
+	if err != nil {
+		return nil, err
+	}
+	return ql, nil
 }
 
 func (s *Server) quicGetTLSConfig(_ *tls.ClientHelloInfo) (*tls.Config, error) {
@@ -285,4 +273,40 @@ func (s *Server) createQUICClient(conn net.Conn) *client {
 	c.mu.Unlock()
 
 	return c
+}
+
+type quicDialer struct {
+	tlsConfig  *tls.Config
+	quicConfig *quic.Config
+}
+
+func makeLeafQUICConfig(opts *QUICOpts, timeout time.Duration) (c *quic.Config) {
+	if opts.QUICConfig == nil {
+		c = defaultQUICConfig.Clone()
+	} else {
+		c = opts.QUICConfig.Clone()
+	}
+	if c.HandshakeIdleTimeout == 0 {
+		c.HandshakeIdleTimeout = timeout
+	}
+	return c
+}
+
+func (d *quicDialer) Dial(network, addr string) (net.Conn, error) {
+	conn, err := quic.DialAddr(context.Background(), addr, d.tlsConfig, d.quicConfig)
+	if err != nil {
+		return nil, fmt.Errorf("quic.DialAddr: %w", err)
+	}
+	stream, err := conn.AcceptStream(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("conn.AcceptStream: %w", errors.Join(err, conn.CloseWithError(0, err.Error())))
+	}
+	return &quicConnStream{
+		Connection: conn,
+		Stream:     stream,
+	}, nil
+}
+
+func isQUICURL(u *url.URL) bool {
+	return u.Scheme == quicScheme || u.Scheme == quicLeafScheme
 }
