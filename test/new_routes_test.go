@@ -796,7 +796,7 @@ func TestNewRouteProcessRoutedMsgs(t *testing.T) {
 
 	// Now send to a specific queue group. We should get multiple messages now.
 	routeSend("RMSG $G foo | bar 2\r\nok\r\nPING\r\n")
-	routeExpect(pongRe)
+	t.Logf("%s", routeExpect(pongRe))
 	matches = expectMsgs(2)
 	checkMsg(t, matches[0], "foo", "1", "", "2", "ok")
 
