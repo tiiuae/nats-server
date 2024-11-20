@@ -34,6 +34,7 @@ import (
 	"github.com/nats-io/nkeys"
 	"github.com/nats-io/nuid"
 	"github.com/tiiuae/nats-server/v2/server/sysmem"
+	"github.com/tiiuae/nats-server/v2/server/tpm"
 )
 
 // JetStreamConfig determines this server's configuration.
@@ -47,6 +48,7 @@ type JetStreamConfig struct {
 	Domain       string        `json:"domain,omitempty"`
 	CompressOK   bool          `json:"compress_ok,omitempty"`
 	UniqueTag    string        `json:"unique_tag,omitempty"`
+	Strict       bool          `json:"strict,omitempty"`
 }
 
 // Statistics about JetStream for this server.
@@ -90,6 +92,7 @@ type JetStreamAccountStats struct {
 }
 
 type JetStreamAPIStats struct {
+	Level    int    `json:"level"`
 	Total    uint64 `json:"total"`
 	Errors   uint64 `json:"errors"`
 	Inflight uint64 `json:"inflight,omitempty"`
@@ -105,6 +108,7 @@ type jetStream struct {
 	storeReserved int64
 	memUsed       int64
 	storeUsed     int64
+	queueLimit    int64
 	clustered     int32
 	mu            sync.RWMutex
 	srv           *Server
@@ -172,6 +176,9 @@ type jsAccount struct {
 	updatesSub *subscription
 	lupdate    time.Time
 	utimer     *time.Timer
+
+	// Which account to send NRG traffic into. Empty string is system account.
+	nrgAccount string
 }
 
 // Track general usage for this account.
@@ -213,6 +220,7 @@ func (s *Server) EnableJetStream(config *JetStreamConfig) error {
 	cfg := *config
 	if cfg.StoreDir == _EMPTY_ {
 		cfg.StoreDir = filepath.Join(os.TempDir(), JetStreamStoreDir)
+		s.Warnf("Temporary storage directory used, data could be lost on system reboot")
 	}
 
 	// We will consistently place the 'jetstream' directory under the storedir that was handed to us. Prior to 2.2.3 though
@@ -368,6 +376,40 @@ func (s *Server) checkStoreDir(cfg *JetStreamConfig) error {
 	return nil
 }
 
+// This function sets/updates the jetstream encryption key and cipher based
+// on options. If the TPM options have been specified, a key is generated
+// and sealed by the TPM.
+func (s *Server) initJetStreamEncryption() (err error) {
+	opts := s.getOpts()
+
+	// The TPM settings and other encryption settings are mutually exclusive.
+	if opts.JetStreamKey != _EMPTY_ && opts.JetStreamTpm.KeysFile != _EMPTY_ {
+		return fmt.Errorf("JetStream encryption key may not be used with TPM options")
+	}
+	// if we are using the standard method to set the encryption key just return and carry on.
+	if opts.JetStreamKey != _EMPTY_ {
+		return nil
+	}
+	// if the tpm options are not used then no encryption has been configured and return.
+	if opts.JetStreamTpm.KeysFile == _EMPTY_ {
+		return nil
+	}
+
+	if opts.JetStreamTpm.Pcr == 0 {
+		// Default PCR to use in the TPM. Values can be 0-23, and most platforms
+		// reserve values 0-12 for the OS, boot locker, disc encryption, etc.
+		// 16 used for debugging. In sticking to NATS tradition, we'll use 22
+		// as the default with the option being configurable.
+		opts.JetStreamTpm.Pcr = 22
+	}
+
+	// Using the TPM to generate or get the encryption key and update the encryption options.
+	opts.JetStreamKey, err = tpm.LoadJetStreamEncryptionKeyFromTPM(opts.JetStreamTpm.SrkPassword,
+		opts.JetStreamTpm.KeysFile, opts.JetStreamTpm.KeyPassword, opts.JetStreamTpm.Pcr)
+
+	return err
+}
+
 // enableJetStream will start up the JetStream subsystem.
 func (s *Server) enableJetStream(cfg JetStreamConfig) error {
 	js := &jetStream{srv: s, config: cfg, accounts: make(map[string]*jsAccount), apiSubs: NewSublistNoCache()}
@@ -376,6 +418,9 @@ func (s *Server) enableJetStream(cfg JetStreamConfig) error {
 		s.gcbOutMax = defaultMaxTotalCatchupOutBytes
 	}
 	s.gcbMu.Unlock()
+
+	// TODO: Not currently reloadable.
+	atomic.StoreInt64(&js.queueLimit, s.getOpts().JetStreamRequestQueueLimit)
 
 	s.js.Store(js)
 
@@ -397,6 +442,10 @@ func (s *Server) enableJetStream(cfg JetStreamConfig) error {
 		os.Remove(tmpfile.Name())
 	}
 
+	if err := s.initJetStreamEncryption(); err != nil {
+		return err
+	}
+
 	// JetStream is an internal service so we need to make sure we have a system account.
 	// This system account will export the JetStream service endpoints.
 	if s.SystemAccount() == nil {
@@ -414,6 +463,11 @@ func (s *Server) enableJetStream(cfg JetStreamConfig) error {
 		s.Noticef("")
 	}
 	s.Noticef("---------------- JETSTREAM ----------------")
+
+	if cfg.Strict {
+		s.Noticef("  Strict:          %t", cfg.Strict)
+	}
+
 	s.Noticef("  Max Memory:      %s", friendlyBytes(cfg.MaxMemory))
 	s.Noticef("  Max Storage:     %s", friendlyBytes(cfg.MaxStore))
 	s.Noticef("  Store Directory: \"%s\"", cfg.StoreDir)
@@ -424,6 +478,11 @@ func (s *Server) enableJetStream(cfg JetStreamConfig) error {
 	if ek := opts.JetStreamKey; ek != _EMPTY_ {
 		s.Noticef("  Encryption:      %s", opts.JetStreamCipher)
 	}
+	if opts.JetStreamTpm.KeysFile != _EMPTY_ {
+		s.Noticef("  TPM File:        %q, Pcr: %d", opts.JetStreamTpm.KeysFile,
+			opts.JetStreamTpm.Pcr)
+	}
+	s.Noticef("  API Level:       %d", JSApiLevel)
 	s.Noticef("-------------------------------------------")
 
 	// Setup our internal subscriptions.
@@ -501,6 +560,7 @@ func (s *Server) restartJetStream() error {
 		MaxMemory:    opts.JetStreamMaxMemory,
 		MaxStore:     opts.JetStreamMaxStore,
 		Domain:       opts.JetStreamDomain,
+		Strict:       opts.JetStreamStrict,
 	}
 	s.Noticef("Restarting JetStream")
 	err := s.EnableJetStream(&cfg)
@@ -1399,7 +1459,7 @@ func (a *Account) EnableJetStream(limits map[string]JetStreamAccountLimits) erro
 				// the consumer can reconnect. We will create it as a durable and switch it.
 				cfg.ConsumerConfig.Durable = ofi.Name()
 			}
-			obs, err := e.mset.addConsumerWithAssignment(&cfg.ConsumerConfig, _EMPTY_, nil, true, ActionCreateOrUpdate)
+			obs, err := e.mset.addConsumerWithAssignment(&cfg.ConsumerConfig, _EMPTY_, nil, true, ActionCreateOrUpdate, false)
 			if err != nil {
 				s.Warnf("    Error adding consumer %q: %v", cfg.Name, err)
 				continue
@@ -1440,7 +1500,11 @@ func (a *Account) maxBytesLimits(cfg *StreamConfig) (bool, int64) {
 		return false, 0
 	}
 	jsa.usageMu.RLock()
-	selectedLimits, _, ok := jsa.selectLimits(cfg)
+	var replicas int
+	if cfg != nil {
+		replicas = cfg.Replicas
+	}
+	selectedLimits, _, ok := jsa.selectLimits(replicas)
 	jsa.usageMu.RUnlock()
 	if !ok {
 		return false, 0
@@ -1590,7 +1654,7 @@ func diffCheckedLimits(a, b map[string]JetStreamAccountLimits) map[string]JetStr
 func (jsa *jsAccount) reservedStorage(tier string) (mem, store uint64) {
 	for _, mset := range jsa.streams {
 		cfg := &mset.cfg
-		if tier == _EMPTY_ || tier == tierName(cfg) && cfg.MaxBytes > 0 {
+		if tier == _EMPTY_ || tier == tierName(cfg.Replicas) && cfg.MaxBytes > 0 {
 			switch cfg.Storage {
 			case FileStorage:
 				store += uint64(cfg.MaxBytes)
@@ -1607,7 +1671,7 @@ func (jsa *jsAccount) reservedStorage(tier string) (mem, store uint64) {
 func reservedStorage(sas map[string]*streamAssignment, tier string) (mem, store uint64) {
 	for _, sa := range sas {
 		cfg := sa.Config
-		if tier == _EMPTY_ || tier == tierName(cfg) && cfg.MaxBytes > 0 {
+		if tier == _EMPTY_ || tier == tierName(cfg.Replicas) && cfg.MaxBytes > 0 {
 			switch cfg.Storage {
 			case FileStorage:
 				store += uint64(cfg.MaxBytes)
@@ -1637,6 +1701,7 @@ func (a *Account) JetStreamUsage() JetStreamAccountStats {
 		stats.Memory, stats.Store = jsa.storageTotals()
 		stats.Domain = js.config.Domain
 		stats.API = JetStreamAPIStats{
+			Level:  JSApiLevel,
 			Total:  jsa.apiTotal,
 			Errors: jsa.apiErrors,
 		}
@@ -1695,17 +1760,29 @@ func (a *Account) JetStreamUsage() JetStreamAccountStats {
 				stats.ReservedMemory, stats.ReservedStore = reservedStorage(sas, _EMPTY_)
 			}
 			for _, sa := range sas {
-				stats.Consumers += len(sa.consumers)
-				if !defaultTier {
-					tier := tierName(sa.Config)
-					u, ok := stats.Tiers[tier]
-					if !ok {
-						u = JetStreamTier{}
-					}
-					u.Streams++
+				if defaultTier {
+					stats.Consumers += len(sa.consumers)
+				} else {
 					stats.Streams++
-					u.Consumers += len(sa.consumers)
-					stats.Tiers[tier] = u
+					streamTier := tierName(sa.Config.Replicas)
+					su, ok := stats.Tiers[streamTier]
+					if !ok {
+						su = JetStreamTier{}
+					}
+					su.Streams++
+					stats.Tiers[streamTier] = su
+
+					// Now consumers, check each since could be different tiers.
+					for _, ca := range sa.consumers {
+						stats.Consumers++
+						consumerTier := tierName(ca.Config.replicas(sa.Config))
+						cu, ok := stats.Tiers[consumerTier]
+						if !ok {
+							cu = JetStreamTier{}
+						}
+						cu.Consumers++
+						stats.Tiers[consumerTier] = cu
+					}
 				}
 			}
 		} else {
@@ -2089,9 +2166,8 @@ func (js *jetStream) limitsExceeded(storeType StorageType) bool {
 	return js.wouldExceedLimits(storeType, 0)
 }
 
-func tierName(cfg *StreamConfig) string {
+func tierName(replicas int) string {
 	// TODO (mh) this is where we could select based off a placement tag as well "qos:tier"
-	replicas := cfg.Replicas
 	if replicas == 0 {
 		replicas = 1
 	}
@@ -2111,11 +2187,11 @@ func (jsa *jsAccount) jetStreamAndClustered() (*jetStream, bool) {
 }
 
 // jsa.usageMu read lock should be held.
-func (jsa *jsAccount) selectLimits(cfg *StreamConfig) (JetStreamAccountLimits, string, bool) {
+func (jsa *jsAccount) selectLimits(replicas int) (JetStreamAccountLimits, string, bool) {
 	if selectedLimits, ok := jsa.limits[_EMPTY_]; ok {
 		return selectedLimits, _EMPTY_, true
 	}
-	tier := tierName(cfg)
+	tier := tierName(replicas)
 	if selectedLimits, ok := jsa.limits[tier]; ok {
 		return selectedLimits, tier, true
 	}
@@ -2315,6 +2391,7 @@ func (js *jetStream) usageStats() *JetStreamStats {
 	stats.ReservedStore = uint64(js.storeReserved)
 	s := js.srv
 	js.mu.RUnlock()
+	stats.API.Level = JSApiLevel
 	stats.API.Total = uint64(atomic.LoadInt64(&js.apiTotal))
 	stats.API.Errors = uint64(atomic.LoadInt64(&js.apiErrors))
 	stats.API.Inflight = uint64(atomic.LoadInt64(&js.apiInflight))
@@ -2452,9 +2529,13 @@ func (s *Server) dynJetStreamConfig(storeDir string, maxStore, maxMem int64) *Je
 	} else {
 		// Create one in tmp directory, but make it consistent for restarts.
 		jsc.StoreDir = filepath.Join(os.TempDir(), "nats", JetStreamStoreDir)
+		s.Warnf("Temporary storage directory used, data could be lost on system reboot")
 	}
 
 	opts := s.getOpts()
+
+	// Strict mode.
+	jsc.Strict = opts.JetStreamStrict
 
 	// Sync options.
 	jsc.SyncInterval = opts.SyncInterval
@@ -2545,7 +2626,7 @@ func (a *Account) addStreamTemplate(tc *StreamTemplateConfig) (*streamTemplate, 
 	// FIXME(dlc) - Hacky
 	tcopy := tc.deepCopy()
 	tcopy.Config.Name = "_"
-	cfg, apiErr := s.checkStreamCfg(tcopy.Config, a)
+	cfg, apiErr := s.checkStreamCfg(tcopy.Config, a, false)
 	if apiErr != nil {
 		return nil, apiErr
 	}

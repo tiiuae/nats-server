@@ -1,21 +1,22 @@
 module github.com/tiiuae/nats-server/v2
 
-go 1.21
+go 1.22
 
-toolchain go1.21.4
+toolchain go1.22.8
 
 require (
-	github.com/klauspost/compress v1.17.7
-	github.com/minio/highwayhash v1.0.2
-	github.com/nats-io/jwt/v2 v2.5.5
+	github.com/google/go-tpm v0.9.0
+	github.com/klauspost/compress v1.17.11
+	github.com/minio/highwayhash v1.0.3
+	github.com/nats-io/jwt/v2 v2.7.2
 	github.com/nats-io/nkeys v0.4.7
 	github.com/nats-io/nuid v1.0.1
 	github.com/quic-go/quic-go v0.42.0
 	github.com/tiiuae/nats.go v0.0.0-20240408164459-e9b242a665a4
-	go.uber.org/automaxprocs v1.5.3
-	golang.org/x/crypto v0.22.0
-	golang.org/x/sys v0.19.0
-	golang.org/x/time v0.5.0
+	go.uber.org/automaxprocs v1.6.0
+	golang.org/x/crypto v0.29.0
+	golang.org/x/sys v0.27.0
+	golang.org/x/time v0.8.0
 )
 
 require (

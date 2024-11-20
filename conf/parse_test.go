@@ -1,6 +1,8 @@
 package conf
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,6 +26,27 @@ func test(t *testing.T, data string, ex map[string]any) {
 
 	if !reflect.DeepEqual(m, ex) {
 		t.Fatalf("Not Equal:\nReceived: '%+v'\nExpected: '%+v'\n", m, ex)
+	}
+
+	// Also test ParseWithChecks
+	n, err := ParseWithChecks(data)
+	if err != nil {
+		t.Fatalf("Received err: %v\n", err)
+	}
+	if n == nil {
+		t.Fatal("Received nil map")
+	}
+	// Compare with the original results.
+	a, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(b, a) {
+		t.Fatalf("Not Equal:\nReceived: '%+v'\nExpected: '%+v'\n", string(a), string(b))
 	}
 }
 
@@ -736,6 +759,117 @@ func TestJSONParseCompat(t *testing.T) {
 			}
 			if !reflect.DeepEqual(m, test.expected) {
 				t.Fatalf("Not Equal:\nReceived: '%+v'\nExpected: '%+v'\n", m, test.expected)
+			}
+		})
+	}
+}
+
+func TestBlocks(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		input    string
+		expected map[string]any
+		err      string
+		linepos  string
+	}{
+		{
+			"inline block",
+			`{ listen: 0.0.0.0:4222 }`,
+			map[string]any{
+				"listen": "0.0.0.0:4222",
+			},
+			"", "",
+		},
+		{
+			"newline block",
+			`{
+				listen: 0.0.0.0:4222
+			 }`,
+			map[string]any{
+				"listen": "0.0.0.0:4222",
+			},
+			"", "",
+		},
+		{
+			"newline block with trailing comment",
+			`
+			{
+				listen: 0.0.0.0:4222
+			}
+			# wibble
+			`,
+			map[string]any{
+				"listen": "0.0.0.0:4222",
+			},
+			"", "",
+		},
+		{
+			"nested newline blocks with trailing comment",
+			`
+			{
+				{
+					listen: 0.0.0.0:4222 // random comment
+				}
+				# wibble1
+			}
+			# wibble2
+			`,
+			map[string]any{
+				"listen": "0.0.0.0:4222",
+			},
+			"", "",
+		},
+		{
+			"top line values in block scope",
+			`
+			{
+			  "debug":              False
+			  "prof_port":          8221
+			  "server_name":        "aws-useast2-natscj1-1"
+			}
+			`,
+			map[string]any{
+				"debug":       false,
+				"prof_port":   int64(8221),
+				"server_name": "aws-useast2-natscj1-1",
+			},
+			"", "",
+		},
+		{
+			"comment in block scope after value parse",
+			`
+			{
+			  "debug":              False
+			  "server_name":        "gcp-asianortheast3-natscj1-1"
+
+			  # Profile port specification.
+			  "prof_port":          8221
+			}
+			`,
+			map[string]any{
+				"debug":       false,
+				"prof_port":   int64(8221),
+				"server_name": "gcp-asianortheast3-natscj1-1",
+			},
+			"", "",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f, err := os.CreateTemp(t.TempDir(), "nats.conf-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(f.Name(), []byte(test.input), 066); err != nil {
+				t.Error(err)
+			}
+			if m, err := ParseFile(f.Name()); err == nil {
+				if !reflect.DeepEqual(m, test.expected) {
+					t.Fatalf("Not Equal:\nReceived: '%+v'\nExpected: '%+v'\n", m, test.expected)
+				}
+			} else if !strings.Contains(err.Error(), test.err) || !strings.Contains(err.Error(), test.linepos) {
+				t.Errorf("expected invalid conf error, got: %v", err)
+			} else if err != nil {
+				t.Error(err)
 			}
 		})
 	}

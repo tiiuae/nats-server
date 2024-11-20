@@ -738,15 +738,10 @@ func TestClientConnectToRoutePort(t *testing.T) {
 }
 
 type checkDuplicateRouteLogger struct {
-	sync.Mutex
+	DummyLogger
 	gotDuplicate bool
 }
 
-func (l *checkDuplicateRouteLogger) Noticef(format string, v ...any) {}
-func (l *checkDuplicateRouteLogger) Errorf(format string, v ...any)  {}
-func (l *checkDuplicateRouteLogger) Warnf(format string, v ...any)   {}
-func (l *checkDuplicateRouteLogger) Fatalf(format string, v ...any)  {}
-func (l *checkDuplicateRouteLogger) Tracef(format string, v ...any)  {}
 func (l *checkDuplicateRouteLogger) Debugf(format string, v ...any) {
 	l.Lock()
 	defer l.Unlock()
@@ -2027,7 +2022,7 @@ func TestRoutePool(t *testing.T) {
 				} else {
 					if v := r.stats.inMsgs; v < 1000 {
 						r.mu.Unlock()
-						t.Fatalf("Expected at least 1000 in in msgs for route %v, got %v", i+1, v)
+						t.Fatalf("Expected at least 1000 in msgs for route %v, got %v", i+1, v)
 					}
 				}
 				r.mu.Unlock()
@@ -3357,7 +3352,8 @@ func TestRoutePoolAndPerAccountWithOlderServer(t *testing.T) {
 
 type testDuplicateRouteLogger struct {
 	DummyLogger
-	ch chan struct{}
+	ch    chan struct{}
+	count int
 }
 
 func (l *testDuplicateRouteLogger) Noticef(format string, args ...any) {
@@ -3369,6 +3365,9 @@ func (l *testDuplicateRouteLogger) Noticef(format string, args ...any) {
 	case l.ch <- struct{}{}:
 	default:
 	}
+	l.Mutex.Lock()
+	l.count++
+	l.Mutex.Unlock()
 }
 
 // This test will make sure that a server with pooling does not
@@ -4160,6 +4159,110 @@ func TestRouteNoLeakOnSlowConsumer(t *testing.T) {
 	}
 }
 
+func TestRouteNoAppSubLeakOnSlowConsumer(t *testing.T) {
+	o1 := DefaultOptions()
+	o1.MaxPending = 1024
+	o1.MaxPayload = int32(o1.MaxPending)
+	s1 := RunServer(o1)
+	defer s1.Shutdown()
+
+	o2 := DefaultOptions()
+	o2.MaxPending = 1024
+	o2.MaxPayload = int32(o2.MaxPending)
+	o2.Routes = RoutesFromStr(fmt.Sprintf("nats://127.0.0.1:%d", o1.Cluster.Port))
+	s2 := RunServer(o2)
+	defer s2.Shutdown()
+
+	checkClusterFormed(t, s1, s2)
+
+	checkSub := func(expected bool) {
+		t.Helper()
+		checkFor(t, 2*time.Second, 50*time.Millisecond, func() error {
+			subsz, err := s1.Subsz(&SubszOptions{Subscriptions: true, Account: globalAccountName})
+			require_NoError(t, err)
+			for _, sub := range subsz.Subs {
+				if sub.Subject == "foo" {
+					if expected {
+						return nil
+					}
+					return fmt.Errorf("Subscription should not have been found: %+v", sub)
+				}
+			}
+			if expected {
+				return fmt.Errorf("Subscription on `foo` not found")
+			}
+			return nil
+		})
+	}
+
+	checkRoutedSub := func(expected bool) {
+		t.Helper()
+		checkFor(t, 2*time.Second, 50*time.Millisecond, func() error {
+			routez, err := s2.Routez(&RoutezOptions{Subscriptions: true})
+			require_NoError(t, err)
+			for _, route := range routez.Routes {
+				if route.Account != _EMPTY_ {
+					continue
+				}
+				if len(route.Subs) == 1 && route.Subs[0] == "foo" {
+					if expected {
+						return nil
+					}
+					return fmt.Errorf("Subscription should not have been found: %+v", route.Subs)
+				}
+			}
+			if expected {
+				return fmt.Errorf("Did not find `foo` subscription")
+			}
+			return nil
+		})
+	}
+
+	checkClosed := func(cid uint64) {
+		t.Helper()
+		checkFor(t, 2*time.Second, 50*time.Millisecond, func() error {
+			connz, err := s1.Connz(&ConnzOptions{State: ConnClosed, CID: cid, Subscriptions: true})
+			if err != nil {
+				return err
+			}
+			require_Len(t, len(connz.Conns), 1)
+			conn := connz.Conns[0]
+			require_Equal(t, conn.Reason, SlowConsumerPendingBytes.String())
+			subs := conn.Subs
+			require_Len(t, len(subs), 1)
+			require_Equal[string](t, subs[0], "foo")
+			return nil
+		})
+	}
+
+	for i := 0; i < 5; i++ {
+		nc := natsConnect(t, s1.ClientURL())
+		defer nc.Close()
+
+		natsSubSync(t, nc, "foo")
+		natsFlush(t, nc)
+
+		checkSub(true)
+		checkRoutedSub(true)
+
+		cid, err := nc.GetClientID()
+		require_NoError(t, err)
+		c := s1.getClient(cid)
+		payload := make([]byte, 2048)
+		c.mu.Lock()
+		c.queueOutbound([]byte(fmt.Sprintf("MSG foo 1 2048\r\n%s\r\n", payload)))
+		closed := c.isClosed()
+		c.mu.Unlock()
+
+		require_True(t, closed)
+		checkSub(false)
+		checkRoutedSub(false)
+		checkClosed(cid)
+
+		nc.Close()
+	}
+}
+
 func TestRouteSlowConsumerRecover(t *testing.T) {
 	o1 := DefaultOptions()
 	o1.Cluster.PoolSize = -1
@@ -4215,9 +4318,11 @@ func TestRouteSlowConsumerRecover(t *testing.T) {
 
 	ncA, err := nats.Connect(s1.Addr().String())
 	require_NoError(t, err)
+	defer ncA.Close()
 
 	ncB, err := nats.Connect(s2.Addr().String())
 	require_NoError(t, err)
+	defer ncB.Close()
 
 	var wg sync.WaitGroup
 	ncB.Subscribe("test", func(*nats.Msg) {
@@ -4230,7 +4335,7 @@ func TestRouteSlowConsumerRecover(t *testing.T) {
 
 	go func() {
 		var total int
-		payload := fmt.Appendf(nil, strings.Repeat("A", 132*1024))
+		payload := bytes.Repeat([]byte("A"), 132*1024)
 		for range time.NewTicker(30 * time.Millisecond).C {
 			select {
 			case <-ctx.Done():
@@ -4316,5 +4421,211 @@ func TestRouteNoLeakOnAuthTimeout(t *testing.T) {
 	// There shouldn't be a route entry as we didn't set up.
 	if nc := s.NumRoutes(); nc != 0 {
 		t.Fatalf("Server should have no route connections, got %v", nc)
+	}
+}
+
+func TestRouteNoRaceOnClusterNameNegotiation(t *testing.T) {
+	// Running the test 5 times was consistently producing the race.
+	for i := 0; i < 5; i++ {
+		o1 := DefaultOptions()
+		// Set this cluster name as dynamic
+		o1.Cluster.Name = _EMPTY_
+		// Increase number of routes and pinned accounts to increase
+		// the number of processRouteConnect() happening in parallel
+		// to produce the race.
+		o1.Cluster.PoolSize = 5
+		o1.Cluster.PinnedAccounts = []string{"A", "B", "C", "D"}
+		o1.Accounts = []*Account{NewAccount("A"), NewAccount("B"), NewAccount("C"), NewAccount("D")}
+		s1 := RunServer(o1)
+		defer s1.Shutdown()
+
+		route := RoutesFromStr(fmt.Sprintf("nats://127.0.0.1:%d", o1.Cluster.Port))
+
+		o2 := DefaultOptions()
+		// Set this one as explicit. Use name that is likely to be "higher"
+		// than the dynamic one.
+		o2.Cluster.Name = "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+		o2.Cluster.PoolSize = 5
+		o2.Cluster.PinnedAccounts = []string{"A", "B", "C", "D"}
+		o2.Accounts = []*Account{NewAccount("A"), NewAccount("B"), NewAccount("C"), NewAccount("D")}
+		o2.Routes = route
+		s2 := RunServer(o2)
+		defer s2.Shutdown()
+		checkClusterFormed(t, s1, s2)
+		s2.Shutdown()
+		s1.Shutdown()
+	}
+}
+
+func TestRouteImplicitNotTooManyDuplicates(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		pooling     bool
+		compression bool
+	}{
+		{"no pooling-no compression", false, false},
+		{"no pooling-compression", false, true},
+		{"pooling-no compression", true, false},
+		{"pooling-compression", true, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			o := DefaultOptions()
+			o.ServerName = "SEED"
+			if !test.pooling {
+				o.Cluster.PoolSize = -1
+			}
+			if !test.compression {
+				o.Cluster.Compression.Mode = CompressionOff
+			}
+			seed := RunServer(o)
+			defer seed.Shutdown()
+
+			dl := &testDuplicateRouteLogger{}
+
+			servers := make([]*Server, 0, 10)
+			for i := 0; i < cap(servers); i++ {
+				io := DefaultOptions()
+				io.ServerName = fmt.Sprintf("IMPLICIT_%d", i+1)
+				io.NoLog = false
+				io.Routes = RoutesFromStr(fmt.Sprintf("nats://127.0.0.1:%d", o.Cluster.Port))
+				if !test.pooling {
+					io.Cluster.PoolSize = -1
+				}
+				if !test.compression {
+					io.Cluster.Compression.Mode = CompressionOff
+				}
+				is, err := NewServer(io)
+				require_NoError(t, err)
+				// Will do defer of shutdown later.
+				is.SetLogger(dl, true, false)
+				is.Start()
+				servers = append(servers, is)
+			}
+
+			allServers := make([]*Server, 0, len(servers)+1)
+			allServers = append(allServers, seed)
+			allServers = append(allServers, servers...)
+
+			// Let's make sure that we wait for each server to be ready.
+			for _, s := range allServers {
+				if !s.ReadyForConnections(2 * time.Second) {
+					t.Fatalf("Server %q is not ready for connections", s)
+				}
+			}
+
+			// Do the defer of shutdown of all servers this way instead of individual
+			// defers when starting them. It takes less time for the servers to shutdown
+			// this way.
+			defer func() {
+				for _, s := range allServers {
+					s.Shutdown()
+				}
+			}()
+			checkClusterFormed(t, allServers...)
+
+			dl.Mutex.Lock()
+			count := dl.count
+			dl.Mutex.Unlock()
+			// Getting duplicates should not be considered fatal, it is an optimization
+			// to reduce the occurrences of those. But to make sure we don't have a
+			// regression, we will fail the test if we get say more than 20 or so (
+			// without the code change, we would get more than 500 of duplicates).
+			if count > 20 {
+				t.Fatalf("Got more duplicates than anticipated: %v", count)
+			}
+		})
+	}
+}
+
+func TestRouteImplicitJoinsSeparateGroups(t *testing.T) {
+	// The test TestRouteImplicitNotTooManyDuplicates makes sure that we do
+	// not have too many duplicate routes cases when processing implicit routes.
+	// This test is to ensure that the code changes to reduce the number
+	// of duplicate routes does not prevent the formation of the cluster
+	// with the given setup (which is admittedly not good since a disconnect
+	// between some routes would not result in a reconnect leading to a full mesh).
+	// Still, original code was able to create the original full mesh, so we want
+	// to make sure that this is still possible.
+	for _, test := range []struct {
+		name        string
+		pooling     bool
+		compression bool
+	}{
+		{"no pooling-no compression", false, false},
+		{"no pooling-compression", false, true},
+		{"pooling-no compression", true, false},
+		{"pooling-compression", true, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			setOpts := func(o *Options) {
+				if !test.pooling {
+					o.Cluster.PoolSize = -1
+				}
+				if !test.compression {
+					o.Cluster.Compression.Mode = CompressionOff
+				}
+			}
+
+			// Create a cluster s1/s2/s3
+			o1 := DefaultOptions()
+			o1.ServerName = "S1"
+			setOpts(o1)
+			s1 := RunServer(o1)
+			defer s1.Shutdown()
+
+			o2 := DefaultOptions()
+			o2.ServerName = "S2"
+			setOpts(o2)
+			o2.Routes = RoutesFromStr(fmt.Sprintf("nats://127.0.0.1:%d", o1.Cluster.Port))
+			s2 := RunServer(o2)
+			defer s2.Shutdown()
+
+			tmpl := `
+				server_name: "S3"
+				listen: "127.0.0.1:-1"
+				cluster {
+					name: "abc"
+					listen: "127.0.0.1:-1"
+					%s
+					%s
+					routes: ["nats://127.0.0.1:%d"%s]
+				}
+			`
+			var poolCfg string
+			var compressionCfg string
+			if !test.pooling {
+				poolCfg = "pool_size: -1"
+			}
+			if !test.compression {
+				compressionCfg = "compression: off"
+			}
+			conf := createConfFile(t, []byte(fmt.Sprintf(tmpl, poolCfg, compressionCfg, o1.Cluster.Port, _EMPTY_)))
+			s3, _ := RunServerWithConfig(conf)
+			defer s3.Shutdown()
+
+			checkClusterFormed(t, s1, s2, s3)
+
+			// Now s4 and s5 connected to each other, but not linked to s1/s2/s3
+			o4 := DefaultOptions()
+			o4.ServerName = "S4"
+			setOpts(o4)
+			s4 := RunServer(o4)
+			defer s4.Shutdown()
+
+			o5 := DefaultOptions()
+			o5.ServerName = "S5"
+			setOpts(o5)
+			o5.Routes = RoutesFromStr(fmt.Sprintf("nats://127.0.0.1:%d", o4.Cluster.Port))
+			s5 := RunServer(o5)
+			defer s5.Shutdown()
+
+			checkClusterFormed(t, s4, s5)
+
+			// Now add a route from s3 to s4 and make sure that we have a full mesh.
+			routeToS4 := fmt.Sprintf(`, "nats://127.0.0.1:%d"`, o4.Cluster.Port)
+			reloadUpdateConfig(t, s3, conf, fmt.Sprintf(tmpl, poolCfg, compressionCfg, o1.Cluster.Port, routeToS4))
+
+			checkClusterFormed(t, s1, s2, s3, s4, s5)
+		})
 	}
 }

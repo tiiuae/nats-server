@@ -14,12 +14,13 @@
 package server
 
 import (
+	"cmp"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"net/url"
 	"reflect"
-	"sort"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -847,6 +848,7 @@ func (l *leafNodeOption) Apply(s *Server) {
 	opts := s.getOpts()
 	if l.tlsFirstChanged {
 		s.Noticef("Reloaded: LeafNode TLS HandshakeFirst value is: %v", opts.LeafNode.TLSHandshakeFirst)
+		s.Noticef("Reloaded: LeafNode TLS HandshakeFirstFallback value is: %v", opts.LeafNode.TLSHandshakeFirstFallback)
 		for _, r := range opts.LeafNode.Remotes {
 			s.Noticef("Reloaded: LeafNode Remote to %v TLS HandshakeFirst value is: %v", r.URLs, r.TLSHandshakeFirst)
 		}
@@ -995,9 +997,11 @@ func (s *Server) Reload() error {
 	return s.ReloadOptions(newOpts)
 }
 
-// ReloadOptions applies any supported options from the provided Option
+// ReloadOptions applies any supported options from the provided Options
 // type. This returns an error if an option which doesn't support
 // hot-swapping was changed.
+// The provided Options type should not be re-used afterwards.
+// Either use Options.Clone() to pass a copy, or make a new one.
 func (s *Server) ReloadOptions(newOpts *Options) error {
 	s.reloadMu.Lock()
 	defer s.reloadMu.Unlock()
@@ -1129,43 +1133,30 @@ func (s *Server) reloadOptions(curOpts, newOpts *Options) error {
 func imposeOrder(value any) error {
 	switch value := value.(type) {
 	case []*Account:
-		sort.Slice(value, func(i, j int) bool {
-			return value[i].Name < value[j].Name
-		})
+		slices.SortFunc(value, func(i, j *Account) int { return cmp.Compare(i.Name, j.Name) })
 		for _, a := range value {
-			sort.Slice(a.imports.streams, func(i, j int) bool {
-				return a.imports.streams[i].acc.Name < a.imports.streams[j].acc.Name
-			})
+			slices.SortFunc(a.imports.streams, func(i, j *streamImport) int { return cmp.Compare(i.acc.Name, j.acc.Name) })
 		}
 	case []*User:
-		sort.Slice(value, func(i, j int) bool {
-			return value[i].Username < value[j].Username
-		})
+		slices.SortFunc(value, func(i, j *User) int { return cmp.Compare(i.Username, j.Username) })
 	case []*NkeyUser:
-		sort.Slice(value, func(i, j int) bool {
-			return value[i].Nkey < value[j].Nkey
-		})
+		slices.SortFunc(value, func(i, j *NkeyUser) int { return cmp.Compare(i.Nkey, j.Nkey) })
 	case []*url.URL:
-		sort.Slice(value, func(i, j int) bool {
-			return value[i].String() < value[j].String()
-		})
+		slices.SortFunc(value, func(i, j *url.URL) int { return cmp.Compare(i.String(), j.String()) })
 	case []string:
-		sort.Strings(value)
+		slices.Sort(value)
 	case []*jwt.OperatorClaims:
-		sort.Slice(value, func(i, j int) bool {
-			return value[i].Issuer < value[j].Issuer
-		})
+		slices.SortFunc(value, func(i, j *jwt.OperatorClaims) int { return cmp.Compare(i.Issuer, j.Issuer) })
 	case GatewayOpts:
-		sort.Slice(value.Gateways, func(i, j int) bool {
-			return value.Gateways[i].Name < value.Gateways[j].Name
-		})
+		slices.SortFunc(value.Gateways, func(i, j *RemoteGatewayOpts) int { return cmp.Compare(i.Name, j.Name) })
 	case WebsocketOpts:
-		sort.Strings(value.AllowedOrigins)
-	case string, bool, uint8, int, int32, int64, time.Duration, float64, nil, LeafNodeOpts, ClusterOpts, *tls.Config, PinnedCertSet,
+		slices.Sort(value.AllowedOrigins)
+	case string, bool, uint8, uint16, int, int32, int64, time.Duration, float64, nil, LeafNodeOpts, ClusterOpts, *tls.Config, PinnedCertSet,
 		*URLAccResolver, *MemAccResolver, *DirAccResolver, *CacheDirAccResolver, Authentication, MQTTOpts, jwt.TagList,
 		*OCSPConfig, map[string]string, JSLimitOpts, StoreCipher, *OCSPResponseCacheConfig:
 		// explicitly skipped types
 	case *AuthCallout:
+	case JSTpmOpts:
 	default:
 		// this will fail during unit tests
 		return fmt.Errorf("OnReload, sort or explicitly skip type: %s",
@@ -1365,14 +1356,16 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			tmpNew.TLSConfig = nil
 			tmpOld.tlsConfigOpts = nil
 			tmpNew.tlsConfigOpts = nil
-			// We will allow TLSHandshakeFirst to me config reloaded. First,
+			// We will allow TLSHandshakeFirst to be config reloaded. First,
 			// we just want to detect if there was a change in the leafnodes{}
 			// block, and if not, we will check the remotes.
-			handshakeFirstChanged := tmpOld.TLSHandshakeFirst != tmpNew.TLSHandshakeFirst
+			handshakeFirstChanged := tmpOld.TLSHandshakeFirst != tmpNew.TLSHandshakeFirst ||
+				tmpOld.TLSHandshakeFirstFallback != tmpNew.TLSHandshakeFirstFallback
 			// If changed, set them (in the temporary variables) to false so that the
 			// rest of the comparison does not fail.
 			if handshakeFirstChanged {
 				tmpOld.TLSHandshakeFirst, tmpNew.TLSHandshakeFirst = false, false
+				tmpOld.TLSHandshakeFirstFallback, tmpNew.TLSHandshakeFirstFallback = 0, 0
 			} else if len(tmpOld.Remotes) == len(tmpNew.Remotes) {
 				// Since we don't support changes in the remotes, we will do a
 				// simple pass to see if there was a change of this field.

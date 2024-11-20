@@ -271,6 +271,33 @@ type JSConsumerQuorumLostAdvisory struct {
 	Domain   string      `json:"domain,omitempty"`
 }
 
+const JSConsumerGroupPinnedAdvisoryType = "io.nats.jetstream.advisory.v1.consumer_group_pinned"
+
+// JSConsumerGroupPinnedAdvisory that a group switched to a new pinned client
+type JSConsumerGroupPinnedAdvisory struct {
+	TypedEvent
+	Account        string `json:"account,omitempty"`
+	Stream         string `json:"stream"`
+	Consumer       string `json:"consumer"`
+	Domain         string `json:"domain,omitempty"`
+	Group          string `json:"group"`
+	PinnedClientId string `json:"pinned_id"`
+}
+
+const JSConsumerGroupUnpinnedAdvisoryType = "io.nats.jetstream.advisory.v1.consumer_group_unpinned"
+
+// JSConsumerGroupUnpinnedAdvisory indicates that a pin was lost
+type JSConsumerGroupUnpinnedAdvisory struct {
+	TypedEvent
+	Account  string `json:"account,omitempty"`
+	Stream   string `json:"stream"`
+	Consumer string `json:"consumer"`
+	Domain   string `json:"domain,omitempty"`
+	Group    string `json:"group"`
+	// one of "admin" or "timeout", could be an enum up to the implementor to decide
+	Reason string `json:"reason"`
+}
+
 // JSServerOutOfStorageAdvisoryType is sent when the server is out of storage space.
 const JSServerOutOfStorageAdvisoryType = "io.nats.jetstream.advisory.v1.server_out_of_space"
 
@@ -294,4 +321,15 @@ type JSServerRemovedAdvisory struct {
 	ServerID string `json:"server_id"`
 	Cluster  string `json:"cluster"`
 	Domain   string `json:"domain,omitempty"`
+}
+
+// JSAPILimitReachedAdvisoryType is sent when the JS API request queue limit is reached.
+const JSAPILimitReachedAdvisoryType = "io.nats.jetstream.advisory.v1.api_limit_reached"
+
+// JSAPILimitReachedAdvisory is a advisory published when JetStream hits the queue length limit.
+type JSAPILimitReachedAdvisory struct {
+	TypedEvent
+	Server  string `json:"server"`           // Server that created the event, name or ID
+	Domain  string `json:"domain,omitempty"` // Domain the server belongs to
+	Dropped int64  `json:"dropped"`          // How many messages did we drop from the queue
 }

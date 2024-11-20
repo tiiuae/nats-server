@@ -15,6 +15,7 @@ package server
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
@@ -23,7 +24,7 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1000,7 +1001,7 @@ func (s *Server) mqttHandleClosedClient(c *client) {
 
 	// This needs to be done outside of any lock.
 	if doClean {
-		if err := sess.clear(); err != nil {
+		if err := sess.clear(true); err != nil {
 			c.Errorf(err.Error())
 		}
 	}
@@ -1475,7 +1476,7 @@ func (s *Server) mqttCreateAccountSessionManager(acc *Account, quitCh chan struc
 	// Opportunistically delete the old (legacy) consumer, from v2.10.10 and
 	// before. Ignore any errors that might arise.
 	rmLegacyDurName := mqttRetainedMsgsStreamName + "_" + jsa.id
-	jsa.deleteConsumer(mqttRetainedMsgsStreamName, rmLegacyDurName)
+	jsa.deleteConsumer(mqttRetainedMsgsStreamName, rmLegacyDurName, true)
 
 	// Create a new, uniquely names consumer for retained messages for this
 	// server. The prior one will expire eventually.
@@ -1701,8 +1702,14 @@ func (jsa *mqttJSA) createDurableConsumer(cfg *CreateConsumerRequest) (*JSApiCon
 	return ccr, ccr.ToError()
 }
 
-func (jsa *mqttJSA) deleteConsumer(streamName, consName string) (*JSApiConsumerDeleteResponse, error) {
+// if noWait is specified, does not wait for the JS response, returns nil
+func (jsa *mqttJSA) deleteConsumer(streamName, consName string, noWait bool) (*JSApiConsumerDeleteResponse, error) {
 	subj := fmt.Sprintf(JSApiConsumerDeleteT, streamName, consName)
+	if noWait {
+		jsa.sendMsg(subj, nil)
+		return nil, nil
+	}
+
 	cdri, err := jsa.newRequest(mqttJSAConsumerDel, subj, 0, nil)
 	if err != nil {
 		return nil, err
@@ -1905,61 +1912,61 @@ func (as *mqttAccountSessionManager) processJSAPIReplies(_ *subscription, pc *cl
 	case mqttJSAStreamCreate:
 		var resp = &JSApiStreamCreateResponse{}
 		if err := json.Unmarshal(msg, resp); err != nil {
-			resp.Error = NewJSInvalidJSONError()
+			resp.Error = NewJSInvalidJSONError(err)
 		}
 		out(resp)
 	case mqttJSAStreamUpdate:
 		var resp = &JSApiStreamUpdateResponse{}
 		if err := json.Unmarshal(msg, resp); err != nil {
-			resp.Error = NewJSInvalidJSONError()
+			resp.Error = NewJSInvalidJSONError(err)
 		}
 		out(resp)
 	case mqttJSAStreamLookup:
 		var resp = &JSApiStreamInfoResponse{}
 		if err := json.Unmarshal(msg, &resp); err != nil {
-			resp.Error = NewJSInvalidJSONError()
+			resp.Error = NewJSInvalidJSONError(err)
 		}
 		out(resp)
 	case mqttJSAStreamDel:
 		var resp = &JSApiStreamDeleteResponse{}
 		if err := json.Unmarshal(msg, &resp); err != nil {
-			resp.Error = NewJSInvalidJSONError()
+			resp.Error = NewJSInvalidJSONError(err)
 		}
 		out(resp)
 	case mqttJSAConsumerCreate:
 		var resp = &JSApiConsumerCreateResponse{}
 		if err := json.Unmarshal(msg, resp); err != nil {
-			resp.Error = NewJSInvalidJSONError()
+			resp.Error = NewJSInvalidJSONError(err)
 		}
 		out(resp)
 	case mqttJSAConsumerDel:
 		var resp = &JSApiConsumerDeleteResponse{}
 		if err := json.Unmarshal(msg, resp); err != nil {
-			resp.Error = NewJSInvalidJSONError()
+			resp.Error = NewJSInvalidJSONError(err)
 		}
 		out(resp)
 	case mqttJSAMsgStore, mqttJSASessPersist:
 		var resp = &JSPubAckResponse{}
 		if err := json.Unmarshal(msg, resp); err != nil {
-			resp.Error = NewJSInvalidJSONError()
+			resp.Error = NewJSInvalidJSONError(err)
 		}
 		out(resp)
 	case mqttJSAMsgLoad:
 		var resp = &JSApiMsgGetResponse{}
 		if err := json.Unmarshal(msg, &resp); err != nil {
-			resp.Error = NewJSInvalidJSONError()
+			resp.Error = NewJSInvalidJSONError(err)
 		}
 		out(resp)
 	case mqttJSAStreamNames:
 		var resp = &JSApiStreamNamesResponse{}
 		if err := json.Unmarshal(msg, resp); err != nil {
-			resp.Error = NewJSInvalidJSONError()
+			resp.Error = NewJSInvalidJSONError(err)
 		}
 		out(resp)
 	case mqttJSAMsgDelete:
 		var resp = &JSApiMsgDeleteResponse{}
 		if err := json.Unmarshal(msg, resp); err != nil {
-			resp.Error = NewJSInvalidJSONError()
+			resp.Error = NewJSInvalidJSONError(err)
 		}
 		out(resp)
 	default:
@@ -1979,9 +1986,13 @@ func (as *mqttAccountSessionManager) processRetainedMsg(_ *subscription, c *clie
 	}
 	// If lastSeq is 0 (nothing to recover, or done doing it) and this is
 	// from our own server, ignore.
+	as.mu.RLock()
 	if as.rrmLastSeq == 0 && rm.Origin == as.jsa.id {
+		as.mu.RUnlock()
 		return
 	}
+	as.mu.RUnlock()
+
 	// At this point we either recover from our own server, or process a remote retained message.
 	seq, _, _ := ackReplyInfo(reply)
 
@@ -1989,11 +2000,13 @@ func (as *mqttAccountSessionManager) processRetainedMsg(_ *subscription, c *clie
 	as.handleRetainedMsg(rm.Subject, &mqttRetainedMsgRef{sseq: seq}, rm, false)
 
 	// If we were recovering (lastSeq > 0), then check if we are done.
+	as.mu.Lock()
 	if as.rrmLastSeq > 0 && seq >= as.rrmLastSeq {
 		as.rrmLastSeq = 0
 		close(as.rrmDoneCh)
 		as.rrmDoneCh = nil
 	}
+	as.mu.Unlock()
 }
 
 func (as *mqttAccountSessionManager) processRetainedMsgDel(_ *subscription, c *client, _ *Account, subject, reply string, rmsg []byte) {
@@ -3178,7 +3191,7 @@ func (sess *mqttSession) save() error {
 //
 // Runs from the client's readLoop.
 // Lock not held on entry, but session is in the locked map.
-func (sess *mqttSession) clear() error {
+func (sess *mqttSession) clear(noWait bool) error {
 	var durs []string
 	var pubRelDur string
 
@@ -3206,19 +3219,19 @@ func (sess *mqttSession) clear() error {
 	sess.mu.Unlock()
 
 	for _, dur := range durs {
-		if _, err := sess.jsa.deleteConsumer(mqttStreamName, dur); isErrorOtherThan(err, JSConsumerNotFoundErr) {
+		if _, err := sess.jsa.deleteConsumer(mqttStreamName, dur, noWait); isErrorOtherThan(err, JSConsumerNotFoundErr) {
 			return fmt.Errorf("unable to delete consumer %q for session %q: %v", dur, sess.id, err)
 		}
 	}
 	if pubRelDur != _EMPTY_ {
-		_, err := sess.jsa.deleteConsumer(mqttOutStreamName, pubRelDur)
+		_, err := sess.jsa.deleteConsumer(mqttOutStreamName, pubRelDur, noWait)
 		if isErrorOtherThan(err, JSConsumerNotFoundErr) {
 			return fmt.Errorf("unable to delete consumer %q for session %q: %v", pubRelDur, sess.id, err)
 		}
 	}
 
 	if seq > 0 {
-		err := sess.jsa.deleteMsg(mqttSessStreamName, seq, true)
+		err := sess.jsa.deleteMsg(mqttSessStreamName, seq, !noWait)
 		// Ignore the various errors indicating that the message (or sequence)
 		// is already deleted, can happen in a cluster.
 		if isErrorOtherThan(err, JSSequenceNotFoundErrF) {
@@ -3417,7 +3430,7 @@ func (sess *mqttSession) untrackPublish(pi uint16) (jsAckSubject string) {
 	return ack.jsAckSubject
 }
 
-// trackPubRel is invoked in 2 cases: (a) when we receive a PUBREC and we need
+// trackAsPubRel is invoked in 2 cases: (a) when we receive a PUBREC and we need
 // to change from tracking the PI as a PUBLISH to a PUBREL; and (b) when we
 // attempt to deliver the PUBREL to record the JS ack subject for it.
 //
@@ -3484,7 +3497,7 @@ func (sess *mqttSession) untrackPubRel(pi uint16) (jsAckSubject string) {
 func (sess *mqttSession) deleteConsumer(cc *ConsumerConfig) {
 	sess.mu.Lock()
 	sess.tmaxack -= cc.MaxAckPending
-	sess.jsa.sendq.push(&mqttJSPubMsg{subj: sess.jsa.prefixDomain(fmt.Sprintf(JSApiConsumerDeleteT, mqttStreamName, cc.Durable))})
+	sess.jsa.deleteConsumer(mqttStreamName, cc.Durable, true)
 	sess.mu.Unlock()
 }
 
@@ -3730,7 +3743,7 @@ func (s *Server) mqttProcessConnect(c *client, cp *mqttConnectProto, trace bool)
 		c.authViolation()
 		return ErrAuthentication
 	}
-	// Now that we are are authenticated, we have the client bound to the account.
+	// Now that we are authenticated, we have the client bound to the account.
 	// Get the account's level MQTT sessions manager. If it does not exists yet,
 	// this will create it along with the streams where sessions and messages
 	// are stored.
@@ -3823,7 +3836,7 @@ CHECK:
 			// This Session lasts as long as the Network Connection. State data
 			// associated with this Session MUST NOT be reused in any subsequent
 			// Session.
-			if err := es.clear(); err != nil {
+			if err := es.clear(false); err != nil {
 				asm.removeSession(es, true)
 				return err
 			}
@@ -4419,9 +4432,7 @@ func (s *Server) mqttCheckPubRetainedPerms() {
 			})
 		}
 		asm.mu.RUnlock()
-		sort.Slice(rms, func(i, j int) bool {
-			return rms[i].rmsg.sseq < rms[j].rmsg.sseq
-		})
+		slices.SortFunc(rms, func(i, j retainedMsg) int { return cmp.Compare(i.rmsg.sseq, j.rmsg.sseq) })
 
 		perms := map[string]*perm{}
 		deletes := map[string]uint64{}
@@ -4498,13 +4509,13 @@ func generatePubPerms(perms *Permissions) *perm {
 func pubAllowed(perms *perm, subject string) bool {
 	allowed := true
 	if perms.allow != nil {
-		r := perms.allow.Match(subject)
-		allowed = len(r.psubs) != 0
+		np, _ := perms.allow.NumInterest(subject)
+		allowed = np != 0
 	}
 	// If we have a deny list and are currently allowed, check that as well.
 	if allowed && perms.deny != nil {
-		r := perms.deny.Match(subject)
-		allowed = len(r.psubs) == 0
+		np, _ := perms.deny.NumInterest(subject)
+		allowed = np == 0
 	}
 	return allowed
 }

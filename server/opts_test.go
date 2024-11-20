@@ -67,12 +67,13 @@ func TestDefaultOptions(t *testing.T) {
 		LeafNode: LeafNodeOpts{
 			ReconnectInterval: DEFAULT_LEAF_NODE_RECONNECT,
 		},
-		ConnectErrorReports:   DEFAULT_CONNECT_ERROR_REPORTS,
-		ReconnectErrorReports: DEFAULT_RECONNECT_ERROR_REPORTS,
-		MaxTracedMsgLen:       0,
-		JetStreamMaxMemory:    -1,
-		JetStreamMaxStore:     -1,
-		SyncInterval:          2 * time.Minute,
+		ConnectErrorReports:        DEFAULT_CONNECT_ERROR_REPORTS,
+		ReconnectErrorReports:      DEFAULT_RECONNECT_ERROR_REPORTS,
+		MaxTracedMsgLen:            0,
+		JetStreamMaxMemory:         -1,
+		JetStreamMaxStore:          -1,
+		SyncInterval:               2 * time.Minute,
+		JetStreamRequestQueueLimit: JSDefaultRequestQueueLimit,
 	}
 
 	opts := &Options{}
@@ -2540,6 +2541,69 @@ func TestParsingLeafNodeRemotes(t *testing.T) {
 			t.Fatal("Expected urls to be random")
 		}
 	})
+
+	t.Run("parse config file js_cluster_migrate", func(t *testing.T) {
+		content := `
+		leafnodes {
+			remotes = [
+				{
+					url: nats-leaf://127.0.0.1:2222
+					account: foo // Local Account to bind to..
+					credentials: "./my.creds"
+					js_cluster_migrate: true
+				},
+				{
+					url: nats-leaf://127.0.0.1:2222
+					account: bar // Local Account to bind to..
+					credentials: "./my.creds"
+					js_cluster_migrate: {
+						leader_migrate_delay: 30s
+					}
+				},
+				{
+					url: nats-leaf://127.0.0.1:2222
+					account: baz // Local Account to bind to..
+					credentials: "./my.creds"
+					js_cluster_migrate: false
+				}
+			]
+		}
+		`
+		conf := createConfFile(t, []byte(content))
+		opts, err := ProcessConfigFile(conf)
+		if err != nil {
+			t.Fatalf("Error processing file: %v", err)
+		}
+		if len(opts.LeafNode.Remotes) != 3 {
+			t.Fatalf("Expected 2 remote, got %d", len(opts.LeafNode.Remotes))
+		}
+		u, _ := url.Parse("nats-leaf://127.0.0.1:2222")
+		expected := []*RemoteLeafOpts{
+			{
+				URLs:                    []*url.URL{u},
+				LocalAccount:            "foo",
+				Credentials:             "./my.creds",
+				JetStreamClusterMigrate: true,
+			},
+			{
+				URLs:                         []*url.URL{u},
+				LocalAccount:                 "bar",
+				Credentials:                  "./my.creds",
+				JetStreamClusterMigrate:      true,
+				JetStreamClusterMigrateDelay: 30 * time.Second,
+			},
+			{
+				URLs:                    []*url.URL{u},
+				LocalAccount:            "baz",
+				Credentials:             "./my.creds",
+				JetStreamClusterMigrate: false,
+			},
+		}
+		if !reflect.DeepEqual(opts.LeafNode.Remotes, expected) {
+			t.Fatalf("Expected %v, got %v", expected, opts.LeafNode.Remotes)
+		}
+	})
+
 }
 
 func TestLargeMaxControlLine(t *testing.T) {
@@ -2932,6 +2996,32 @@ func TestReadOperatorJWT(t *testing.T) {
 	}
 }
 
+const operatorJwtList = `
+	listen: "127.0.0.1:-1"
+    system_account = SYSACC
+	operator: [
+        eyJ0eXAiOiJqd3QiLCJhbGciOiJlZDI1NTE5In0.eyJqdGkiOiJJVEdJNjNCUUszM1VNN1pBSzZWT1RXNUZEU01ESlNQU1pRQ0RMNUlLUzZQTVhBU0ROQ01RIiwiaWF0IjoxNTg5ODM5MjA1LCJpc3MiOiJPQ1k2REUyRVRTTjNVT0RGVFlFWEJaTFFMSTdYNEdTWFI1NE5aQzRCQkxJNlFDVFpVVDY1T0lWTiIsIm5hbWUiOiJPUCIsInN1YiI6Ik9DWTZERTJFVFNOM1VPREZUWUVYQlpMUUxJN1g0R1NYUjU0TlpDNEJCTEk2UUNUWlVUNjVPSVZOIiwidHlwZSI6Im9wZXJhdG9yIiwibmF0cyI6eyJhY2NvdW50X3NlcnZlcl91cmwiOiJodHRwOi8vbG9jYWxob3N0OjgwMDAvand0L3YxIiwib3BlcmF0b3Jfc2VydmljZV91cmxzIjpbIm5hdHM6Ly9sb2NhbGhvc3Q6NDIyMiJdLCJzeXN0ZW1fYWNjb3VudCI6IkFEWjU0N0IyNFdIUExXT0s3VE1MTkJTQTdGUUZYUjZVTTJOWjRISE5JQjdSREZWWlFGT1o0R1FRIn19.3u710KqMLwgXwsMvhxfEp9xzK84XyAZ-4dd6QY0T6hGj8Bw9mS-HcQ7HbvDDNU01S61tNFfpma_JR6LtB3ixBg,
+        eyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.eyJqdGkiOiIzTVJCS1BRTU1IUjdOQVFQU080NUlWTlkyMzVMRlQyTEs0WkZFVU1KWU9EWUJXU0RXWlRBIiwiaWF0IjoxNzI2NTYwMjAwLCJpc3MiOiJPQkxPR1VCSVVQSkhGVE00RjRaTE9CR1BMSlBJRjRTR0JDWUVERUtFUVNNWVVaTVFTMkRGTUUyWCIsIm5hbWUiOiJvcDIiLCJzdWIiOiJPQkxPR1VCSVVQSkhGVE00RjRaTE9CR1BMSlBJRjRTR0JDWUVERUtFUVNNWVVaTVFTMkRGTUUyWCIsIm5hdHMiOnsic2lnbmluZ19rZXlzIjpbIk9ES0xMSTZWWldWNk03V1RaV0I3MjVITE9MVFFRVERLNE5RR1ZFR0Q0Q083SjJMMlVJWk81U0dXIl0sInN5c3RlbV9hY2NvdW50IjoiQUNRVFdWR1NHSFlWWTNSNkQyV01PM1Y2TFYyTUdLNUI3RzQ3RTQzQkhKQjZGUVZZN0VITlRNTUciLCJ0eXBlIjoib3BlcmF0b3IiLCJ2ZXJzaW9uIjoyfX0.8kUmC6CwGLTJSs1zj_blsMpP5b6n2jZhZFNvMPXvJlRyyR5ZbCsxJ442BimaxaiosS8T-IFcZAIphtiOcqhRCg
+    ]
+`
+
+func TestReadMultipleOperatorJWT(t *testing.T) {
+	confFileName := createConfFile(t, []byte(operatorJwtList))
+	opts, err := ProcessConfigFile(confFileName)
+	if err != nil {
+		t.Fatalf("Received unexpected error %s", err)
+	}
+
+	require_Equal(t, len(opts.TrustedOperators), 2)
+	require_Equal(t, opts.TrustedOperators[0].Name, "OP")
+	require_Equal(t, opts.TrustedOperators[1].Name, "op2")
+	require_Equal(t, opts.TrustedOperators[0].SystemAccount, "ADZ547B24WHPLWOK7TMLNBSA7FQFXR6UM2NZ4HHNIB7RDFVZQFOZ4GQQ")
+	require_Equal(t, opts.TrustedOperators[1].SystemAccount, "ACQTWVGSGHYVY3R6D2WMO3V6LV2MGK5B7G47E43BHJB6FQVY7EHNTMMG")
+	// check if system account precedence is correct
+	require_Equal(t, opts.SystemAccount, "SYSACC")
+
+}
+
 // using memory resolver so this test does not have to start the memory resolver
 const operatorJwtWithSysAccAndMemResolver = `
 	listen: "127.0.0.1:-1"
@@ -3292,10 +3382,112 @@ func TestAuthorizationAndAccountsMisconfigurations(t *testing.T) {
 			`,
 			"Can not have a token",
 		},
+		{
+			"auth callout allowed accounts",
+			`
+			accounts {
+				AUTH { users = [ {user: "auth", password: "auth"} ] }
+				FOO {}
+			}
+			authorization {
+				auth_callout {
+					issuer: "ABJHLOVMPA4CI6R5KLNGOB4GSLNIY7IOUPAJC4YFNDLQVIOBYQGUWVLA"
+					account: AUTH
+					auth_users: [ auth ]
+					allowed_accounts: [ BAR ]
+				}
+			}
+			`,
+			"auth_callout allowed account \"BAR\" not found in configured accounts",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			conf := createConfFile(t, []byte(test.config))
 			if _, err := ProcessConfigFile(conf); err == nil || !strings.Contains(err.Error(), test.err) {
+				t.Fatalf("Expected error %q, got %q", test.err, err.Error())
+			}
+		})
+	}
+}
+
+// TestProcessConfigString duplicates the previous test, but uses the (*Options).ProcessConfigString
+// instead of the ProcessConfigFile function.
+func TestProcessConfigString(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		config string
+		err    string
+	}{
+		{
+			"duplicate users",
+			`
+			authorization = {users = [ {user: "user1", pass: "pwd"} ] }
+			accounts { ACC { users = [ {user: "user1"} ] } }
+			`,
+			fmt.Sprintf("Duplicate user %q detected", "user1"),
+		},
+		{
+			"duplicate nkey",
+			`
+			authorization = {users = [ {nkey: UC6NLCN7AS34YOJVCYD4PJ3QB7QGLYG5B5IMBT25VW5K4TNUJODM7BOX} ] }
+			accounts { ACC { users = [ {nkey: UC6NLCN7AS34YOJVCYD4PJ3QB7QGLYG5B5IMBT25VW5K4TNUJODM7BOX} ] } }
+			`,
+			fmt.Sprintf("Duplicate nkey %q detected", "UC6NLCN7AS34YOJVCYD4PJ3QB7QGLYG5B5IMBT25VW5K4TNUJODM7BOX"),
+		},
+		{
+			"auth single user and password and accounts users",
+			`
+			authorization = {user: "user1", password: "pwd"}
+			accounts = { ACC { users = [ {user: "user2", pass: "pwd"} ] } }
+			`,
+			"Can not have a single user/pass",
+		},
+		{
+			"auth single user and password and accounts nkeys",
+			`
+			authorization = {user: "user1", password: "pwd"}
+			accounts = { ACC { users = [ {nkey: UC6NLCN7AS34YOJVCYD4PJ3QB7QGLYG5B5IMBT25VW5K4TNUJODM7BOX} ] } }
+			`,
+			"Can not have a single user/pass",
+		},
+		{
+			"auth token and accounts users",
+			`
+			authorization = {token: "my_token"}
+			accounts = { ACC { users = [ {user: "user2", pass: "pwd"} ] } }
+			`,
+			"Can not have a token",
+		},
+		{
+			"auth token and accounts nkeys",
+			`
+			authorization = {token: "my_token"}
+			accounts = { ACC { users = [ {nkey: UC6NLCN7AS34YOJVCYD4PJ3QB7QGLYG5B5IMBT25VW5K4TNUJODM7BOX} ] } }
+			`,
+			"Can not have a token",
+		},
+		{
+			"auth callout allowed accounts",
+			`
+			accounts {
+				AUTH { users = [ {user: "auth", password: "auth"} ] }
+				FOO {}
+			}
+			authorization {
+				auth_callout {
+					issuer: "ABJHLOVMPA4CI6R5KLNGOB4GSLNIY7IOUPAJC4YFNDLQVIOBYQGUWVLA"
+					account: AUTH
+					auth_users: [ auth ]
+					allowed_accounts: [ BAR ]
+				}
+			}
+			`,
+			"auth_callout allowed account \"BAR\" not found in configured accounts",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			opts := &Options{}
+			if err := opts.ProcessConfigString(test.config); err == nil || !strings.Contains(err.Error(), test.err) {
 				t.Fatalf("Expected error %q, got %q", test.err, err.Error())
 			}
 		})

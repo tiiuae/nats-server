@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"sort"
@@ -55,6 +56,47 @@ func DefaultMonitorOptions() *Options {
 		NoSigs:       true,
 		Tags:         []string{"tag"},
 	}
+}
+
+func runMonitorJSServer(t *testing.T, clientPort int, monitorPort int, clusterPort int, routePort int) (*Server, *Options) {
+	resetPreviousHTTPConnections()
+	tmpDir := t.TempDir()
+	cf := createConfFile(t, []byte(fmt.Sprintf(`
+		listen: 127.0.0.1:%d
+		http: 127.0.0.1:%d
+		system_account: SYS
+		accounts {
+			SYS {
+				users [{user: sys, password: pwd}]
+			}
+			ACC {
+				users [{user: usr, password: pwd}]
+				// In clustered mode, these reservations will not impact any one server.
+				jetstream: {max_store: 4Mb, max_memory: 5Mb}
+			}
+			BCC_TO_HAVE_ONE_EXTRA {
+				users [{user: usr2, password: pwd}]
+				jetstream: enabled
+			}
+		}
+		jetstream: {
+			max_mem_store: 10Mb
+			max_file_store: 10Mb
+			store_dir: '%s'
+			unique_tag: az
+			limits: {
+				max_ha_assets: 1000
+			}
+		}
+		cluster {
+			name: cluster_name
+			listen: 127.0.0.1:%d
+			routes: [nats-route://127.0.0.1:%d]
+		}
+		server_name: server_%d
+		server_tags: [ "az:%d", "tag" ] `, clientPort, monitorPort, tmpDir, clusterPort, routePort, clientPort, clientPort)))
+
+	return RunServerWithConfig(cf)
 }
 
 func runMonitorServer() *Server {
@@ -229,7 +271,7 @@ func TestVarzSubscriptionsResetProperly(t *testing.T) {
 }
 
 func TestHandleVarz(t *testing.T) {
-	s := runMonitorServer()
+	s, _ := runMonitorJSServer(t, -1, -1, 0, 0)
 	defer s.Shutdown()
 
 	url := fmt.Sprintf("http://127.0.0.1:%d/", s.MonitorAddr().Port)
@@ -245,7 +287,7 @@ func TestHandleVarz(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	nc := createClientConnSubscribeAndPublish(t, s)
+	nc := createClientConnWithUserSubscribeAndPublish(t, s, "sys", "pwd")
 	defer nc.Close()
 
 	for mode := 0; mode < 2; mode++ {
@@ -269,14 +311,33 @@ func TestHandleVarz(t *testing.T) {
 		if v.OutBytes != 5 {
 			t.Fatalf("Expected OutBytes of 5, got %v\n", v.OutBytes)
 		}
-		if v.Subscriptions != 0 {
-			t.Fatalf("Expected Subscriptions of 0, got %v\n", v.Subscriptions)
+		if v.Subscriptions <= 10 {
+			t.Fatalf("Expected Subscriptions of at least 10, got %v\n", v.Subscriptions)
 		}
-		if v.Name != "monitor_server" {
-			t.Fatal("Expected ServerName to be 'monitor_server'")
+		if v.Name != "server_-1" {
+			t.Fatalf("Expected ServerName to be 'monitor_server' got %q", v.Name)
 		}
 		if !v.Tags.Contains("tag") {
-			t.Fatal("Expected tags to be 'tag'")
+			t.Fatalf("Expected tags to be 'tag' got %v", v.Tags)
+		}
+		if v.JetStream.Config == nil {
+			t.Fatalf("JS Config not set")
+		}
+		sd := filepath.Join(s.opts.StoreDir, "jetstream")
+		if v.JetStream.Config.StoreDir != sd {
+			t.Fatalf("JS Config is invalid expected %q got %q", sd, v.JetStream.Config.StoreDir)
+		}
+		if v.JetStream.Stats == nil {
+			t.Fatalf("JS Stats not set")
+		}
+		if v.JetStream.Stats.Accounts != 2 {
+			t.Fatalf("Invalid stats expected 2 accounts got %d", v.JetStream.Stats.Accounts)
+		}
+		if v.JetStream.Limits == nil {
+			t.Fatalf("JS limits not set")
+		}
+		if v.JetStream.Limits.MaxHAAssets != 1000 {
+			t.Fatalf("Expected 1000 max_ha_assets got %q", v.JetStream.Limits.MaxHAAssets)
 		}
 	}
 
@@ -3077,6 +3138,14 @@ func TestMonitorLeafNode(t *testing.T) {
 	for mode := 0; mode < 2; mode++ {
 		check := func(t *testing.T, v *Varz) {
 			t.Helper()
+			// Issue 5913. When we have solicited leafnodes but no clustering
+			// and no clustername, we may need a stable clustername so we use
+			// the server name as cluster name. However, we should not expose
+			// it in /varz.
+			if v.Cluster.Name != _EMPTY_ {
+				t.Fatalf("mode=%v - unexpected cluster name: %s", mode, v.Cluster.Name)
+			}
+			// Check rest is as expected.
 			if !reflect.DeepEqual(v.LeafNode, expected) {
 				t.Fatalf("mode=%v - expected %+v, got %+v", mode, expected, v.LeafNode)
 			}
@@ -4044,7 +4113,7 @@ func TestMonitorAccountz(t *testing.T) {
 	body = string(readBody(t, fmt.Sprintf("http://127.0.0.1:%d%s?acc=$SYS", s.MonitorAddr().Port, AccountzPath)))
 	require_Contains(t, body, `"account_detail": {`)
 	require_Contains(t, body, `"account_name": "$SYS",`)
-	require_Contains(t, body, `"subscriptions": 50,`)
+	require_Contains(t, body, `"subscriptions": 52,`)
 	require_Contains(t, body, `"is_system": true,`)
 	require_Contains(t, body, `"system_account": "$SYS"`)
 
@@ -4111,7 +4180,7 @@ func TestMonitorAccountzOperatorMode(t *testing.T) {
 	body = string(readBody(t, fmt.Sprintf("http://127.0.0.1:%d%s?acc=%s", s.MonitorAddr().Port, AccountzPath, sysPub)))
 	require_Contains(t, body, `"account_detail": {`)
 	require_Contains(t, body, fmt.Sprintf(`"account_name": "%s",`, sysPub))
-	require_Contains(t, body, `"subscriptions": 50,`)
+	require_Contains(t, body, `"subscriptions": 52,`)
 	require_Contains(t, body, `"is_system": true,`)
 	require_Contains(t, body, fmt.Sprintf(`"system_account": "%s"`, sysPub))
 
@@ -4126,6 +4195,115 @@ func TestMonitorAccountzOperatorMode(t *testing.T) {
 	require_Contains(t, body, `"received": {`)
 	require_Contains(t, body, `"total_conns": 0,`)
 	require_Contains(t, body, `"leafnodes": 0,`)
+}
+
+func TestMonitorAccountzAccountIssuerUpdate(t *testing.T) {
+	// create an operator set of keys
+	okp, err := nkeys.CreateOperator()
+	require_NoError(t, err)
+	opk, err := okp.PublicKey()
+	require_NoError(t, err)
+
+	// create the system account
+	_, sysPK := createKey(t)
+	sysAc := jwt.NewAccountClaims(sysPK)
+	sysAc.Name = "SYS"
+	sysJwt, err := sysAc.Encode(okp)
+	require_NoError(t, err)
+
+	// create the operator with the system
+	oc := jwt.NewOperatorClaims(opk)
+	oc.Name = "O"
+	// add a signing keys
+	osk1, err := nkeys.CreateOperator()
+	require_NoError(t, err)
+	opk1, err := osk1.PublicKey()
+	require_NoError(t, err)
+	// add a second signing key
+	osk2, err := nkeys.CreateOperator()
+	require_NoError(t, err)
+	opk2, err := osk2.PublicKey()
+	require_NoError(t, err)
+	oc.SigningKeys.Add(opk1, opk2)
+	// set the system account
+	oc.SystemAccount = sysPK
+	// generate
+	oJWT, err := oc.Encode(okp)
+	require_NoError(t, err)
+
+	// create an account
+	akp, apk := createKey(t)
+	ac := jwt.NewAccountClaims(apk)
+	ac.Name = "A"
+	// sign with the signing key
+	aJWT, err := ac.Encode(osk1)
+	require_NoError(t, err)
+
+	// build the mem-resolver
+	conf := createConfFile(t, []byte(fmt.Sprintf(`
+		listen: 127.0.0.1:-1
+		http: 127.0.0.1:-1
+		operator = %s
+		resolver = MEMORY
+		system_account: %s
+		resolver_preload = {
+			%s : %s
+			%s : %s
+		}
+	`, oJWT, sysPK, sysPK, sysJwt, apk, aJWT)))
+
+	// start the server
+	s, _ := RunServerWithConfig(conf)
+	defer s.Shutdown()
+
+	// create an user for account A, or we don't see
+	// the account in accountsz
+	createUser := func() (string, string) {
+		ukp, _ := nkeys.CreateUser()
+		seed, _ := ukp.Seed()
+		upub, _ := ukp.PublicKey()
+		uclaim := newJWTTestUserClaims()
+		uclaim.Subject = upub
+		ujwt, err := uclaim.Encode(akp)
+		require_NoError(t, err)
+		return upub, genCredsFile(t, ujwt, seed)
+	}
+
+	_, aCreds := createUser()
+	// connect the user
+	nc, err := nats.Connect(s.ClientURL(), nats.UserCredentials(aCreds))
+	require_NoError(t, err)
+	defer nc.Close()
+
+	// lookup the account
+	data := readBody(t, fmt.Sprintf("http://127.0.0.1:%d%s?acc=%s", s.MonitorAddr().Port, AccountzPath, apk))
+	var ci Accountz
+	require_NoError(t, json.Unmarshal(data, &ci))
+	require_Equal(t, ci.Account.IssuerKey, opk1)
+
+	// now update the account
+	aJWT, err = ac.Encode(osk2)
+	require_NoError(t, err)
+
+	updatedConf := []byte(fmt.Sprintf(`
+		listen: 127.0.0.1:-1
+		http: 127.0.0.1:-1
+		operator = %s
+		resolver = MEMORY
+		system_account: %s
+		resolver_preload = {
+			%s : %s
+			%s : %s
+		}
+	`, oJWT, sysPK, sysPK, sysJwt, apk, aJWT))
+	// update the configuration file
+	require_NoError(t, os.WriteFile(conf, updatedConf, 0666))
+	// reload
+	require_NoError(t, s.Reload())
+
+	data = readBody(t, fmt.Sprintf("http://127.0.0.1:%d%s?acc=%s", s.MonitorAddr().Port, AccountzPath, apk))
+	require_NoError(t, json.Unmarshal(data, &ci))
+	require_Equal(t, ci.Account.IssuerKey, opk2)
 }
 
 func TestMonitorAuthorizedUsers(t *testing.T) {
@@ -4274,40 +4452,7 @@ func TestMonitorJsz(t *testing.T) {
 		{7500, 7501, 7502, 5502},
 		{5500, 5501, 5502, 7502},
 	} {
-		tmpDir := t.TempDir()
-		cf := createConfFile(t, []byte(fmt.Sprintf(`
-		listen: 127.0.0.1:%d
-		http: 127.0.0.1:%d
-		system_account: SYS
-		accounts {
-			SYS {
-				users [{user: sys, password: pwd}]
-			}
-			ACC {
-				users [{user: usr, password: pwd}]
-				// In clustered mode, these reservations will not impact any one server.
-				jetstream: {max_store: 4Mb, max_memory: 5Mb}
-			}
-			BCC_TO_HAVE_ONE_EXTRA {
-				users [{user: usr2, password: pwd}]
-				jetstream: enabled
-			}
-		}
-		jetstream: {
-			max_mem_store: 10Mb
-			max_file_store: 10Mb
-			store_dir: '%s'
-			unique_tag: az
-		}
-		cluster {
-			name: cluster_name
-			listen: 127.0.0.1:%d
-			routes: [nats-route://127.0.0.1:%d]
-		}
-		server_name: server_%d
-		server_tags: [ "az:%d" ] `, test.port, test.mport, tmpDir, test.cport, test.routed, test.port, test.port)))
-
-		s, _ := RunServerWithConfig(cf)
+		s, _ := runMonitorJSServer(t, test.port, test.mport, test.cport, test.routed)
 		defer s.Shutdown()
 		srvs = append(srvs, s)
 	}
@@ -4376,6 +4521,9 @@ func TestMonitorJsz(t *testing.T) {
 			}
 			if info.Messages != 2 {
 				t.Fatalf("expected two message but got %d", info.Messages)
+			}
+			if info.Limits.MaxHAAssets != 1000 {
+				t.Fatalf("expected max_ha_assets limit to be 1000 got %v", info.Limits)
 			}
 		}
 	})
@@ -4482,6 +4630,25 @@ func TestMonitorJsz(t *testing.T) {
 			}
 			if len(info.AccountDetails[0].Streams[0].Consumer) != 0 {
 				t.Fatalf("expected no consumers to be returned by %s but got %v", url, info)
+			}
+		}
+	})
+	t.Run("stream-leader-only", func(t *testing.T) {
+		// First server
+		info := readJsInfo(monUrl1 + "?streams=true&stream-leader-only=1")
+		for _, a := range info.AccountDetails {
+			for _, s := range a.Streams {
+				if s.Cluster.Leader != srvs[0].serverName() {
+					t.Fatalf("expected stream leader to be %s but got %s", srvs[0].serverName(), s.Cluster.Leader)
+				}
+			}
+		}
+		info = readJsInfo(monUrl2 + "?streams=true&stream-leader-only=1")
+		for _, a := range info.AccountDetails {
+			for _, s := range a.Streams {
+				if s.Cluster.Leader != srvs[1].serverName() {
+					t.Fatalf("expected stream leader to be %s but got %s", srvs[0].serverName(), s.Cluster.Leader)
+				}
 			}
 		}
 	})
@@ -4625,6 +4792,12 @@ func TestMonitorJsz(t *testing.T) {
 			if len(crgroup.RaftGroup) == 0 {
 				t.Fatal("expected consumer raft group info to be included")
 			}
+		}
+	})
+	t.Run("js-api-level", func(t *testing.T) {
+		for _, url := range []string{monUrl1, monUrl2} {
+			info := readJsInfo(url)
+			require_Equal(t, info.API.Level, JSApiLevel)
 		}
 	})
 }
@@ -4807,6 +4980,7 @@ func TestServerIDZRequest(t *testing.T) {
 
 	nc, err := nats.Connect(s.ClientURL(), nats.UserInfo("admin", "s3cr3t!"))
 	require_NoError(t, err)
+	defer nc.Close()
 
 	subject := fmt.Sprintf(serverPingReqSubj, "IDZ")
 	resp, err := nc.Request(subject, nil, time.Second)
@@ -5280,9 +5454,17 @@ func TestHealthzStatusError(t *testing.T) {
 
 	// Intentionally causing an error in readyForConnections().
 	// Note: Private field access, taking advantage of having the tests in the same package.
+	s.mu.Lock()
+	sl := s.listener
 	s.listener = nil
+	s.mu.Unlock()
 
 	checkHealthzEndpoint(t, s.MonitorAddr().String(), http.StatusInternalServerError, "error")
+
+	// Restore for proper shutdown.
+	s.mu.Lock()
+	s.listener = sl
+	s.mu.Unlock()
 }
 
 func TestHealthzStatusUnavailable(t *testing.T) {
@@ -5302,7 +5484,35 @@ func TestHealthzStatusUnavailable(t *testing.T) {
 		t.Fatalf("got an error disabling JetStream: %v", err)
 	}
 
-	checkHealthzEndpoint(t, s.MonitorAddr().String(), http.StatusServiceUnavailable, "unavailable")
+	for _, test := range []struct {
+		name       string
+		url        string
+		statusCode int
+		wantStatus string
+	}{
+		{
+			"healthz",
+			fmt.Sprintf("http://%s/healthz", s.MonitorAddr().String()),
+			http.StatusServiceUnavailable,
+			"unavailable",
+		},
+		{
+			"js-enabled-only",
+			fmt.Sprintf("http://%s/healthz?js-enabled-only=true", s.MonitorAddr().String()),
+			http.StatusServiceUnavailable,
+			"unavailable",
+		},
+		{
+			"js-server-only",
+			fmt.Sprintf("http://%s/healthz?js-server-only=true", s.MonitorAddr().String()),
+			http.StatusOK,
+			"ok",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			expectHealthStatus(t, test.url, test.statusCode, test.wantStatus)
+		})
+	}
 }
 
 // When we converted ipq to use generics we still were using sync.Map. Currently you can not convert
@@ -5339,4 +5549,19 @@ func TestVarzSyncInterval(t *testing.T) {
 	jscfg := pollVarz(t, s, 0, url, nil).JetStream.Config
 	require_True(t, jscfg.SyncInterval == opts.SyncInterval)
 	require_True(t, jscfg.SyncAlways)
+}
+
+func TestVarzJSApiLevel(t *testing.T) {
+	resetPreviousHTTPConnections()
+	opts := DefaultMonitorOptions()
+	opts.JetStream = true
+
+	s := RunServer(opts)
+	defer s.Shutdown()
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/varz", s.MonitorAddr().Port)
+
+	varz := pollVarz(t, s, 0, url, nil)
+	apiLevel := varz.JetStream.Stats.API.Level
+	require_Equal(t, apiLevel, JSApiLevel)
 }

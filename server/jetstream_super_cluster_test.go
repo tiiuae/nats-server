@@ -1,4 +1,4 @@
-// Copyright 2020-2022 The NATS Authors
+// Copyright 2020-2024 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -213,6 +213,7 @@ func TestJetStreamSuperClusterUniquePlacementTag(t *testing.T) {
 			si, err := js.AddStream(cfg)
 			require_NoError(t, err)
 			require_Equal(t, si.Cluster.Name, "C2")
+			s.waitOnStreamLeader(globalAccountName, cfg.Name)
 			cfg.Replicas = 2
 			si, err = js.UpdateStream(cfg)
 			require_NoError(t, err)
@@ -1996,7 +1997,7 @@ func TestJetStreamSuperClusterMovingStreamsWithMirror(t *testing.T) {
 	}()
 
 	// Let it get going.
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(1500 * time.Millisecond)
 
 	// Now move the source to a new cluster.
 	_, err = js.UpdateStream(&nats.StreamConfig{
@@ -2122,12 +2123,16 @@ func TestJetStreamSuperClusterMovingStreamAndMoveBack(t *testing.T) {
 
 			checkMove("C2")
 
-			_, err = js.UpdateStream(&nats.StreamConfig{
-				Name:      "TEST",
-				Replicas:  test.replicas,
-				Placement: &nats.Placement{Tags: []string{"cloud:aws"}},
+			// The move could be completed when looking at the stream info, but the meta leader could still
+			// deny move updates for a short time while state is cleaned up.
+			checkFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+				_, err = js.UpdateStream(&nats.StreamConfig{
+					Name:      "TEST",
+					Replicas:  test.replicas,
+					Placement: &nats.Placement{Tags: []string{"cloud:aws"}},
+				})
+				return err
 			})
-			require_NoError(t, err)
 
 			checkMove("C1")
 		})
@@ -2531,7 +2536,7 @@ func TestJetStreamSuperClusterStateOnRestartPreventsConsumerRecovery(t *testing.
 		require_NoError(t, err)
 	}
 	sub := natsSubSync(t, nc, "d")
-	natsNexMsg(t, sub, time.Second)
+	natsNexMsg(t, sub, 5*time.Second)
 
 	c := sc.clusterForName("C2")
 	cl := c.consumerLeader("$G", "DS", "dlc")
@@ -3361,13 +3366,13 @@ func TestJetStreamSuperClusterSystemLimitsPlacement(t *testing.T) {
 	defer sCluster.shutdown()
 
 	requestLeaderStepDown := func(clientURL string) error {
-		nc, err := nats.Connect(clientURL)
+		nc, err := nats.Connect(clientURL, nats.UserInfo("admin", "s3cr3t!"))
 		if err != nil {
 			return err
 		}
 		defer nc.Close()
 
-		ncResp, err := nc.Request(JSApiLeaderStepDown, nil, 3*time.Second)
+		ncResp, err := nc.Request(JSApiLeaderStepDown, nil, time.Second)
 		if err != nil {
 			return err
 		}

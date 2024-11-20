@@ -22,7 +22,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unsafe"
 )
 
 // Print Results: go test -v  --args --results
@@ -37,7 +36,10 @@ func TestSubjectTreeBasics(t *testing.T) {
 	require_True(t, old == nil)
 	require_False(t, updated)
 	require_Equal(t, st.Size(), 1)
-	// Find with single leaf.
+	// Find shouldn't work with a wildcard.
+	_, found := st.Find(b("foo.bar.*"))
+	require_False(t, found)
+	// But it should with a literal. Find with single leaf.
 	v, found := st.Find(b("foo.bar.baz"))
 	require_True(t, found)
 	require_Equal(t, *v, 22)
@@ -77,10 +79,22 @@ func TestSubjectTreeNodeGrow(t *testing.T) {
 	old, updated := st.Insert(b("foo.bar.E"), 22)
 	require_True(t, old == nil)
 	require_False(t, updated)
+	_, ok = st.root.(*node10)
+	require_True(t, ok)
+	for i := 5; i < 10; i++ {
+		subj := b(fmt.Sprintf("foo.bar.%c", 'A'+i))
+		old, updated := st.Insert(subj, 22)
+		require_True(t, old == nil)
+		require_False(t, updated)
+	}
+	// This one will trigger us to grow.
+	old, updated = st.Insert(b("foo.bar.K"), 22)
+	require_True(t, old == nil)
+	require_False(t, updated)
+	// We have filled a node10.
 	_, ok = st.root.(*node16)
 	require_True(t, ok)
-	// We do not have node48, so once we fill this we should jump to node256.
-	for i := 5; i < 16; i++ {
+	for i := 11; i < 16; i++ {
 		subj := b(fmt.Sprintf("foo.bar.%c", 'A'+i))
 		old, updated := st.Insert(subj, 22)
 		require_True(t, old == nil)
@@ -88,6 +102,20 @@ func TestSubjectTreeNodeGrow(t *testing.T) {
 	}
 	// This one will trigger us to grow.
 	old, updated = st.Insert(b("foo.bar.Q"), 22)
+	require_True(t, old == nil)
+	require_False(t, updated)
+	_, ok = st.root.(*node48)
+	require_True(t, ok)
+	// Fill the node48.
+	for i := 17; i < 48; i++ {
+		subj := b(fmt.Sprintf("foo.bar.%c", 'A'+i))
+		old, updated := st.Insert(subj, 22)
+		require_True(t, old == nil)
+		require_False(t, updated)
+	}
+	// This one will trigger us to grow.
+	subj := b(fmt.Sprintf("foo.bar.%c", 'A'+49))
+	old, updated = st.Insert(subj, 22)
 	require_True(t, old == nil)
 	require_False(t, updated)
 	_, ok = st.root.(*node256)
@@ -149,21 +177,52 @@ func TestSubjectTreeNodeDelete(t *testing.T) {
 	require_True(t, found)
 	require_Equal(t, *v, 11)
 	require_Equal(t, st.root, nil)
-	// Now pop up to a node16 and make sure we can shrink back down.
+	// Now pop up to a node10 and make sure we can shrink back down.
 	for i := 0; i < 5; i++ {
 		subj := fmt.Sprintf("foo.bar.%c", 'A'+i)
 		st.Insert(b(subj), 22)
 	}
-	_, ok := st.root.(*node16)
+	_, ok := st.root.(*node10)
 	require_True(t, ok)
 	v, found = st.Delete(b("foo.bar.A"))
 	require_True(t, found)
 	require_Equal(t, *v, 22)
 	_, ok = st.root.(*node4)
 	require_True(t, ok)
-	// Now pop up to node256
+	// Now pop up to node16
+	for i := 0; i < 11; i++ {
+		subj := fmt.Sprintf("foo.bar.%c", 'A'+i)
+		st.Insert(b(subj), 22)
+	}
+	_, ok = st.root.(*node16)
+	require_True(t, ok)
+	v, found = st.Delete(b("foo.bar.A"))
+	require_True(t, found)
+	require_Equal(t, *v, 22)
+	_, ok = st.root.(*node10)
+	require_True(t, ok)
+	v, found = st.Find(b("foo.bar.B"))
+	require_True(t, found)
+	require_Equal(t, *v, 22)
+	// Now pop up to node48
 	st = NewSubjectTree[int]()
 	for i := 0; i < 17; i++ {
+		subj := fmt.Sprintf("foo.bar.%c", 'A'+i)
+		st.Insert(b(subj), 22)
+	}
+	_, ok = st.root.(*node48)
+	require_True(t, ok)
+	v, found = st.Delete(b("foo.bar.A"))
+	require_True(t, found)
+	require_Equal(t, *v, 22)
+	_, ok = st.root.(*node16)
+	require_True(t, ok)
+	v, found = st.Find(b("foo.bar.B"))
+	require_True(t, found)
+	require_Equal(t, *v, 22)
+	// Now pop up to node256
+	st = NewSubjectTree[int]()
+	for i := 0; i < 49; i++ {
 		subj := fmt.Sprintf("foo.bar.%c", 'A'+i)
 		st.Insert(b(subj), 22)
 	}
@@ -172,7 +231,7 @@ func TestSubjectTreeNodeDelete(t *testing.T) {
 	v, found = st.Delete(b("foo.bar.A"))
 	require_True(t, found)
 	require_Equal(t, *v, 22)
-	_, ok = st.root.(*node16)
+	_, ok = st.root.(*node48)
 	require_True(t, ok)
 	v, found = st.Find(b("foo.bar.B"))
 	require_True(t, found)
@@ -215,7 +274,7 @@ func TestSubjectTreeConstruction(t *testing.T) {
 	st.Insert(b("foo.bar"), 42)
 
 	checkNode := func(an *node, kind string, pors string, numChildren uint16) {
-		//		t.Helper()
+		t.Helper()
 		require_True(t, an != nil)
 		n := *an
 		require_True(t, n != nil)
@@ -227,7 +286,7 @@ func TestSubjectTreeConstruction(t *testing.T) {
 	checkNode(&st.root, "NODE4", "foo.ba", 2)
 	nn := st.root.findChild('r')
 	checkNode(nn, "NODE4", "r", 2)
-	checkNode((*nn).findChild(0), "LEAF", "", 0)
+	checkNode((*nn).findChild(noPivot), "LEAF", "", 0)
 	rnn := (*nn).findChild('.')
 	checkNode(rnn, "NODE4", ".", 3)
 	checkNode((*rnn).findChild('A'), "LEAF", "A", 0)
@@ -342,7 +401,7 @@ func TestSubjectTreeNoPrefix(t *testing.T) {
 		require_True(t, old == nil)
 		require_False(t, updated)
 	}
-	n, ok := st.root.(*node256)
+	n, ok := st.root.(*node48)
 	require_True(t, ok)
 	require_Equal(t, n.numChildren(), 26)
 	v, found := st.Delete(b("B"))
@@ -361,24 +420,6 @@ func TestSubjectTreePartialTerminalWildcardBugMatch(t *testing.T) {
 	st.Insert(b("STATE.GLOBAL.CELL1.7PDSGAALXNN000010.PROPERTY-B"), 1)
 	st.Insert(b("STATE.GLOBAL.CELL1.7PDSGAALXNN000010.PROPERTY-C"), 2)
 	match(t, st, "STATE.GLOBAL.CELL1.7PDSGAALXNN000010.*", 3)
-}
-
-func TestSubjectTreeMaxPrefix(t *testing.T) {
-	st := NewSubjectTree[int]()
-	longPre := strings.Repeat("Z", maxPrefixLen+2)
-	for i := 0; i < 2; i++ {
-		subj := b(fmt.Sprintf("%s.%c", longPre, 'A'+i))
-		old, updated := st.Insert(subj, 22)
-		require_True(t, old == nil)
-		require_False(t, updated)
-	}
-	v, found := st.Find(b(fmt.Sprintf("%s.B", longPre)))
-	require_True(t, found)
-	require_Equal(t, *v, 22)
-	v, found = st.Delete(b(fmt.Sprintf("%s.A", longPre)))
-	require_True(t, found)
-	require_Equal(t, *v, 22)
-	require_Equal(t, st.root.numChildren(), 1)
 }
 
 func TestSubjectTreeMatchSubjectParam(t *testing.T) {
@@ -541,6 +582,25 @@ func TestSubjectTreeMatchMultipleWildcardBasic(t *testing.T) {
 	match(t, st, "A.B.*.D.1.*.*.I.0", 1)
 }
 
+func TestSubjectTreeMatchInvalidWildcard(t *testing.T) {
+	st := NewSubjectTree[int]()
+	st.Insert(b("foo.123"), 22)
+	st.Insert(b("one.two.three.four.five"), 22)
+	st.Insert(b("'*.123"), 22)
+	match(t, st, "invalid.>", 0)
+	match(t, st, ">", 3)
+	match(t, st, `'*.*`, 1)
+	match(t, st, `'*.*.*'`, 0)
+	// None of these should match.
+	match(t, st, "`>`", 0)
+	match(t, st, `">"`, 0)
+	match(t, st, `'>'`, 0)
+	match(t, st, `'*.>'`, 0)
+	match(t, st, `'*.>.`, 0)
+	match(t, st, "`invalid.>`", 0)
+	match(t, st, `'*.*'`, 0)
+}
+
 func TestSubjectTreeRandomTrackEntries(t *testing.T) {
 	st := NewSubjectTree[int]()
 	smap := make(map[string]struct{}, 1000)
@@ -583,9 +643,24 @@ func TestSubjectTreeRandomTrackEntries(t *testing.T) {
 	}
 }
 
-func TestSubjectTreeMetaSize(t *testing.T) {
-	var base meta
-	require_Equal(t, unsafe.Sizeof(base), 28)
+// Needs to be longer then internal node prefix, which currently is 24.
+func TestSubjectTreeLongTokens(t *testing.T) {
+	st := NewSubjectTree[int]()
+	st.Insert(b("a1.aaaaaaaaaaaaaaaaaaaaaa0"), 1)
+	st.Insert(b("a2.0"), 2)
+	st.Insert(b("a1.aaaaaaaaaaaaaaaaaaaaaa1"), 3)
+	st.Insert(b("a2.1"), 4)
+	// Simulate purge of a2.>
+	// This required to show bug.
+	st.Delete(b("a2.0"))
+	st.Delete(b("a2.1"))
+	require_Equal(t, st.Size(), 2)
+	v, found := st.Find(b("a1.aaaaaaaaaaaaaaaaaaaaaa0"))
+	require_True(t, found)
+	require_Equal(t, *v, 1)
+	v, found = st.Find(b("a1.aaaaaaaaaaaaaaaaaaaaaa1"))
+	require_True(t, found)
+	require_Equal(t, *v, 3)
 }
 
 func b(s string) []byte {
@@ -620,4 +695,190 @@ func TestSubjectTreeMatchAllPerf(t *testing.T) {
 		})
 		t.Logf("Match %q took %s and matched %d entries", f, time.Since(start), count)
 	}
+}
+
+func TestSubjectTreeIterPerf(t *testing.T) {
+	if !*runResults {
+		t.Skip()
+	}
+	st := NewSubjectTree[int]()
+
+	for i := 0; i < 1_000_000; i++ {
+		subj := fmt.Sprintf("subj.%d.%d", rand.Intn(100)+1, i)
+		st.Insert(b(subj), 22)
+	}
+
+	start := time.Now()
+	count := 0
+	st.Iter(func(_ []byte, _ *int) bool {
+		count++
+		return true
+	})
+	t.Logf("Iter took %s and matched %d entries", time.Since(start), count)
+}
+
+func TestSubjectTreeNode48(t *testing.T) {
+	var a, b, c leaf[int]
+	var n node48
+
+	n.addChild('A', &a)
+	require_Equal(t, n.key['A'], 1)
+	require_True(t, n.child[0] != nil)
+	require_Equal(t, n.child[0].(*leaf[int]), &a)
+	require_Equal(t, len(n.children()), 1)
+
+	child := n.findChild('A')
+	require_True(t, child != nil)
+	require_Equal(t, (*child).(*leaf[int]), &a)
+
+	n.addChild('B', &b)
+	require_Equal(t, n.key['B'], 2)
+	require_True(t, n.child[1] != nil)
+	require_Equal(t, n.child[1].(*leaf[int]), &b)
+	require_Equal(t, len(n.children()), 2)
+
+	child = n.findChild('B')
+	require_True(t, child != nil)
+	require_Equal(t, (*child).(*leaf[int]), &b)
+
+	n.addChild('C', &c)
+	require_Equal(t, n.key['C'], 3)
+	require_True(t, n.child[2] != nil)
+	require_Equal(t, n.child[2].(*leaf[int]), &c)
+	require_Equal(t, len(n.children()), 3)
+
+	child = n.findChild('C')
+	require_True(t, child != nil)
+	require_Equal(t, (*child).(*leaf[int]), &c)
+
+	n.deleteChild('A')
+	require_Equal(t, len(n.children()), 2)
+	require_Equal(t, n.key['A'], 0) // Now deleted
+	require_Equal(t, n.key['B'], 2) // Untouched
+	require_Equal(t, n.key['C'], 1) // Where A was
+
+	child = n.findChild('A')
+	require_Equal(t, child, nil)
+	require_True(t, n.child[0] != nil)
+	require_Equal(t, n.child[0].(*leaf[int]), &c)
+
+	child = n.findChild('B')
+	require_True(t, child != nil)
+	require_Equal(t, (*child).(*leaf[int]), &b)
+	require_True(t, n.child[1] != nil)
+	require_Equal(t, n.child[1].(*leaf[int]), &b)
+
+	child = n.findChild('C')
+	require_True(t, child != nil)
+	require_Equal(t, (*child).(*leaf[int]), &c)
+	require_True(t, n.child[2] == nil)
+
+	var gotB, gotC bool
+	var iterations int
+	n.iter(func(n node) bool {
+		iterations++
+		if gb, ok := n.(*leaf[int]); ok && &b == gb {
+			gotB = true
+		}
+		if gc, ok := n.(*leaf[int]); ok && &c == gc {
+			gotC = true
+		}
+		return true
+	})
+	require_Equal(t, iterations, 2)
+	require_True(t, gotB)
+	require_True(t, gotC)
+
+	// Check for off-by-one on byte 255 as found by staticcheck, see
+	// https://github.com/nats-io/nats-server/pull/5826.
+	n.addChild(255, &c)
+	require_Equal(t, n.key[255], 3)
+	grown := n.grow().(*node256)
+	require_True(t, grown.findChild(255) != nil)
+	shrunk := n.shrink().(*node16)
+	require_True(t, shrunk.findChild(255) != nil)
+}
+
+func TestSubjectTreeMatchNoCallbackDupe(t *testing.T) {
+	st := NewSubjectTree[int]()
+	st.Insert(b("foo.bar.A"), 1)
+	st.Insert(b("foo.bar.B"), 1)
+	st.Insert(b("foo.bar.C"), 1)
+	st.Insert(b("foo.bar.>"), 1)
+
+	for _, f := range [][]byte{
+		[]byte(">"),
+		[]byte("foo.>"),
+		[]byte("foo.bar.>"),
+	} {
+		seen := map[string]struct{}{}
+		st.Match(f, func(bsubj []byte, _ *int) {
+			subj := string(bsubj)
+			if _, ok := seen[subj]; ok {
+				t.Logf("Match callback was called twice for %q", subj)
+			}
+			seen[subj] = struct{}{}
+		})
+	}
+}
+
+func TestSubjectTreeNilNoPanic(t *testing.T) {
+	var st *SubjectTree[int]
+	st.Match([]byte("foo"), func(_ []byte, _ *int) {})
+	_, found := st.Find([]byte("foo"))
+	require_False(t, found)
+	_, found = st.Delete([]byte("foo"))
+	require_False(t, found)
+	_, found = st.Insert([]byte("foo"), 22)
+	require_False(t, found)
+}
+
+// This bug requires the trailing suffix contain repeating nulls \x00
+// and the second subject be longer with more nulls.
+func TestSubjectTreeInsertLongerLeafSuffixWithTrailingNulls(t *testing.T) {
+	st := NewSubjectTree[int]()
+	subj := []byte("foo.bar.baz_")
+	// add in 10 nulls.
+	for i := 0; i < 10; i++ {
+		subj = append(subj, 0)
+	}
+
+	st.Insert(subj, 1)
+	// add in 10 more nulls.
+	subj2 := subj
+	for i := 0; i < 10; i++ {
+		subj2 = append(subj, 0)
+	}
+	st.Insert(subj2, 2)
+
+	// Make sure we can look them up.
+	v, found := st.Find(subj)
+	require_True(t, found)
+	require_Equal(t, *v, 1)
+	v, found = st.Find(subj2)
+	require_True(t, found)
+	require_Equal(t, *v, 2)
+}
+
+// Make sure the system does not insert any subject with the noPivot (DEL) in it.
+func TestSubjectTreeInsertWithNoPivot(t *testing.T) {
+	st := NewSubjectTree[int]()
+	subj := []byte("foo.bar.baz.")
+	subj = append(subj, noPivot)
+	old, updated := st.Insert(subj, 22)
+	require_True(t, old == nil)
+	require_False(t, updated)
+	require_Equal(t, st.Size(), 0)
+}
+
+// Make sure we don't panic when checking for fwc.
+func TestSubjectTreeMatchHasFWCNoPanic(t *testing.T) {
+	defer func() {
+		p := recover()
+		require_True(t, p == nil)
+	}()
+	st := NewSubjectTree[int]()
+	subj := []byte("foo")
+	st.Insert(subj, 1)
+	st.Match([]byte("."), func(subject []byte, val *int) {})
 }

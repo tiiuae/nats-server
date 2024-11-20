@@ -15,6 +15,7 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -1991,9 +1992,9 @@ func TestJWTAccountURLResolverPermanentFetchFailure(t *testing.T) {
 				importErrCnt++
 			}
 		case <-tmr.C:
-			// connecting and updating, each cause 3 traces (2 + 1 on iteration)
-			if importErrCnt != 6 {
-				t.Fatalf("Expected 6 debug traces, got %d", importErrCnt)
+			// connecting and updating, each cause 3 traces (2 + 1 on iteration) + 1 xtra fetch
+			if importErrCnt != 7 {
+				t.Fatalf("Expected 7 debug traces, got %d", importErrCnt)
 			}
 			return
 		}
@@ -2964,7 +2965,7 @@ func TestJWTAccountLimitsMaxConnsAfterExpired(t *testing.T) {
 	// is now lower, some clients should have been removed.
 	acc, _ := s.LookupAccount(fooPub)
 	acc.mu.Lock()
-	acc.expired = true
+	acc.expired.Store(true)
 	acc.updated = time.Now().UTC().Add(-2 * time.Second) // work around updating to quickly
 	acc.mu.Unlock()
 
@@ -4362,6 +4363,36 @@ func TestJwtTemplates(t *testing.T) {
 	require_Contains(t, err.Error(), "generated invalid subject")
 }
 
+func TestJwtInLineTemplates(t *testing.T) {
+	kp, _ := nkeys.CreateAccount()
+	aPub, _ := kp.PublicKey()
+	ukp, _ := nkeys.CreateUser()
+	upub, _ := ukp.PublicKey()
+	uclaim := newJWTTestUserClaims()
+	uclaim.Name = "myname"
+	uclaim.Subject = upub
+	uclaim.SetScoped(true)
+	uclaim.IssuerAccount = aPub
+	uclaim.Tags.Add("bucket:a")
+
+	lim := jwt.UserPermissionLimits{}
+	lim.Pub.Allow.Add("$JS.API.STREAM.INFO.KV_{{tag(bucket)}}")
+	acc := &Account{nameTag: "accname", tags: []string{"acc:acc1", "acc:acc2"}}
+
+	resLim, err := processUserPermissionsTemplate(lim, uclaim, acc)
+	require_NoError(t, err)
+
+	test := func(expectedSubjects []string, res jwt.StringList) {
+		t.Helper()
+		require_True(t, len(res) == len(expectedSubjects))
+		for _, expetedSubj := range expectedSubjects {
+			require_True(t, res.Contains(expetedSubj))
+		}
+	}
+
+	test(resLim.Pub.Allow, []string{"$JS.API.STREAM.INFO.KV_a"})
+}
+
 func TestJwtTemplateGoodTagAfterBadTag(t *testing.T) {
 	kp, _ := nkeys.CreateAccount()
 	aPub, _ := kp.PublicKey()
@@ -5443,10 +5474,19 @@ func TestJWTJetStreamTiers(t *testing.T) {
 	_, err = js.Publish("testR1-2", msg[:])
 	require_NoError(t, err)
 
+	ainfo, err := js.AccountInfo()
+	require_NoError(t, err)
+	require_Equal(t, ainfo.Tiers["R1"].Store, 1100)
+
 	// test exceeding tiered storage limit
 	_, err = js.Publish("testR1-1", []byte("1"))
 	require_Error(t, err)
 	require_Equal(t, err.Error(), "nats: resource limits exceeded for account")
+
+	// Check that storage has not increased after the rejected publish.
+	ainfo, err = js.AccountInfo()
+	require_NoError(t, err)
+	require_Equal(t, ainfo.Tiers["R1"].Store, 1100)
 
 	time.Sleep(time.Second - time.Since(start)) // make sure the time stamp changes
 	accClaim.Limits.JetStreamTieredLimits["R1"] = jwt.JetStreamLimits{
@@ -5465,9 +5505,22 @@ func TestJWTJetStreamTiers(t *testing.T) {
 	_, err = js.AddConsumer("testR1-3", &nats.ConsumerConfig{Durable: "dur7", AckPolicy: nats.AckExplicitPolicy})
 	require_Error(t, err)
 	require_Equal(t, err.Error(), "nats: maximum consumers limit reached")
+
+	// At this point it will be exactly at the DiskStorage limit so it should not fail.
 	_, err = js.Publish("testR1-3", msg[:])
+	require_NoError(t, err)
+	ainfo, err = js.AccountInfo()
+	require_NoError(t, err)
+	require_Equal(t, ainfo.Tiers["R1"].Store, 1650)
+
+	_, err = js.Publish("testR1-3", []byte("1"))
 	require_Error(t, err)
 	require_Equal(t, err.Error(), "nats: resource limits exceeded for account")
+
+	// Should remain at the same usage.
+	ainfo, err = js.AccountInfo()
+	require_NoError(t, err)
+	require_Equal(t, ainfo.Tiers["R1"].Store, 1650)
 }
 
 func TestJWTJetStreamMaxAckPending(t *testing.T) {
@@ -5624,10 +5677,27 @@ func TestJWTJetStreamMaxStreamBytes(t *testing.T) {
 	_, err = js.AddStream(&nats.StreamConfig{Name: "bar", Replicas: 1, MaxBytes: 2048})
 	require_NoError(t, err)
 
-	// test if we can push more messages into the stream
-	_, err = js.Publish("baz", msg[:]) // exceeds max stream bytes
+	ainfo, err := js.AccountInfo()
+	require_NoError(t, err)
+	require_Equal(t, ainfo.Tiers["R1"].Store, 933)
+
+	// This should be exactly at the limit of the account.
+	_, err = js.Publish("baz", []byte(strings.Repeat("A", 1082)))
+	require_NoError(t, err)
+
+	ainfo, err = js.AccountInfo()
+	require_NoError(t, err)
+	require_Equal(t, ainfo.Tiers["R1"].Store, 2048)
+
+	// Exceed max stream bytes limit.
+	_, err = js.Publish("baz", []byte("1"))
 	require_Error(t, err)
 	require_Equal(t, err.Error(), "nats: resource limits exceeded for account")
+
+	// Confirm no changes after rejected publish.
+	ainfo, err = js.AccountInfo()
+	require_NoError(t, err)
+	require_Equal(t, ainfo.Tiers["R1"].Store, 2048)
 
 	// test disabling max bytes required
 	_, err = js.UpdateStream(&nats.StreamConfig{Name: "bar", Replicas: 1})
@@ -5739,6 +5809,7 @@ func TestJWScopedSigningKeys(t *testing.T) {
 	signer.Key = aSignScopedPub
 	signer.Template.Pub.Deny.Add("denied")
 	signer.Template.Payload = 5
+	signer.Template.AllowedConnectionTypes.Add(jwt.ConnectionTypeStandard)
 	accClaim.SigningKeys.AddScopedSigner(signer)
 	accJwt := encodeClaim(t, accClaim, aExpPub)
 
@@ -5755,11 +5826,16 @@ func TestJWScopedSigningKeys(t *testing.T) {
 			type: full
 			dir: '%s'
 		}
+		websocket {
+			listen: 127.0.0.1:-1
+			no_tls: true
+		}
     `, ojwt, syspub, dirSrv)))
 	s, opts := RunServerWithConfig(cf)
 	defer s.Shutdown()
 
 	url := fmt.Sprintf("nats://%s:%d", opts.Host, opts.Port)
+	wsUrl := fmt.Sprintf("ws://%s:%d", opts.Websocket.Host, opts.Websocket.Port)
 	errChan := make(chan error, 1)
 	defer close(errChan)
 	awaitError := func(expected bool) {
@@ -5813,6 +5889,10 @@ func TestJWScopedSigningKeys(t *testing.T) {
 		nc.Flush()
 		awaitError(true)
 	})
+	t.Run("scoped-signing-key-allowed-conn-types", func(t *testing.T) {
+		_, err := nats.Connect(wsUrl, nats.UserCredentials(aScopedCreds))
+		require_Error(t, err)
+	})
 	t.Run("scoped-signing-key-reload", func(t *testing.T) {
 		reconChan := make(chan struct{}, 1)
 		defer close(reconChan)
@@ -5827,6 +5907,7 @@ func TestJWScopedSigningKeys(t *testing.T) {
 			nats.ReconnectHandler(func(conn *nats.Conn) {
 				reconChan <- struct{}{}
 			}),
+			nats.ReconnectWait(100*time.Millisecond),
 		)
 		defer nc.Close()
 		_, err := nc.ChanSubscribe("denied", msgChan)
@@ -5839,6 +5920,7 @@ func TestJWScopedSigningKeys(t *testing.T) {
 		// Alter scoped permissions and update
 		signer.Template.Payload = -1
 		signer.Template.Pub.Deny.Remove("denied")
+		signer.Template.AllowedConnectionTypes.Add(jwt.ConnectionTypeWebsocket)
 		accClaim.SigningKeys.AddScopedSigner(signer)
 		accUpdatedJwt := encodeClaim(t, accClaim, aExpPub)
 		if updateJwt(t, url, sysCreds, accUpdatedJwt, 1) != 1 {
@@ -5854,6 +5936,11 @@ func TestJWScopedSigningKeys(t *testing.T) {
 		msg := <-msgChan
 		require_Equal(t, string(msg.Data), "way.too.long.for.old.payload.limit")
 		require_Len(t, len(msgChan), 0)
+		nc.Close()
+		nc, err = nats.Connect(wsUrl, nats.UserCredentials(aScopedCreds))
+		require_NoError(t, err)
+		nc.Flush()
+		defer nc.Close()
 	})
 	require_Len(t, len(errChan), 0)
 }
@@ -6840,5 +6927,194 @@ func TestJWTAccountNATSResolverWrongCreds(t *testing.T) {
 	_, err := nats.Connect(sC.ClientURL(), nats.UserCredentials(cCreds), nats.Timeout(500*time.Second))
 	if err != nil && !errors.Is(err, nats.ErrAuthorization) {
 		t.Fatalf("Expected auth error: %v", err)
+	}
+}
+
+// Issue 5480: https://github.com/nats-io/nats-server/issues/5480
+func TestJWTImportsOnServerRestartAndClientsReconnect(t *testing.T) {
+	type namedCreds struct {
+		name  string
+		creds nats.Option
+	}
+	preload := make(map[string]string)
+	users := make(map[string]*namedCreds)
+
+	// sys account
+	_, sysAcc, sysAccClaim := NewJwtAccountClaim("sys")
+	sysAccJWT, err := sysAccClaim.Encode(oKp)
+	require_NoError(t, err)
+	preload[sysAcc] = sysAccJWT
+
+	// main account, other accounts will import from this.
+	mainAccKP, mainAcc, mainAccClaim := NewJwtAccountClaim("main")
+	mainAccClaim.Exports.Add(&jwt.Export{
+		Type:    jwt.Stream,
+		Subject: "city.>",
+	})
+
+	// main account user
+	mainUserClaim := jwt.NewUserClaims("publisher")
+	mainUserClaim.Permissions = jwt.Permissions{
+		Pub: jwt.Permission{
+			Allow: []string{"city.>"},
+		},
+	}
+	mainCreds := createUserCredsEx(t, mainUserClaim, mainAccKP)
+
+	// The main account will be importing from all other accounts.
+	maxAccounts := 100
+	for i := 0; i < maxAccounts; i++ {
+		name := fmt.Sprintf("secondary-%d", i)
+		accKP, acc, accClaim := NewJwtAccountClaim(name)
+
+		accClaim.Exports.Add(&jwt.Export{
+			Type:    jwt.Stream,
+			Subject: "internal.*",
+		})
+		accClaim.Imports.Add(&jwt.Import{
+			Type:    jwt.Stream,
+			Subject: jwt.Subject(fmt.Sprintf("city.%d-1.*", i)),
+			Account: mainAcc,
+		})
+
+		// main account imports from the secondary accounts
+		mainAccClaim.Imports.Add(&jwt.Import{
+			Type:    jwt.Stream,
+			Subject: jwt.Subject(fmt.Sprintf("internal.%d", i)),
+			Account: acc,
+		})
+
+		accJWT, err := accClaim.Encode(oKp)
+		require_NoError(t, err)
+		preload[acc] = accJWT
+
+		userClaim := jwt.NewUserClaims("subscriber")
+		userClaim.Permissions = jwt.Permissions{
+			Sub: jwt.Permission{
+				Allow: []string{"city.>", "internal.*"},
+			},
+			Pub: jwt.Permission{
+				Allow: []string{"internal.*"},
+			},
+		}
+		userCreds := createUserCredsEx(t, userClaim, accKP)
+		users[acc] = &namedCreds{name, userCreds}
+	}
+	mainAccJWT, err := mainAccClaim.Encode(oKp)
+	require_NoError(t, err)
+	preload[mainAcc] = mainAccJWT
+
+	// Start the server with the preload.
+	resolverPreload, err := json.Marshal(preload)
+	require_NoError(t, err)
+	conf := createConfFile(t, []byte(fmt.Sprintf(`
+            listen: 127.0.0.1:4747
+            http: 127.0.0.1:8222
+            operator: %s
+            system_account: %s
+            resolver: MEM
+            resolver_preload: %s
+	`, ojwt, sysAcc, string(resolverPreload))))
+	s, _ := RunServerWithConfig(conf)
+	defer s.Shutdown()
+
+	// Have a connection ready for each one of the accounts.
+	type namedSub struct {
+		name string
+		sub  *nats.Subscription
+	}
+	subs := make(map[string]*namedSub)
+	for acc, user := range users {
+		nc := natsConnect(t, s.ClientURL(), user.creds,
+			// Make the clients attempt to reconnect too fast,
+			// changing this to be above ~200ms mitigates the issue.
+			nats.ReconnectWait(15*time.Millisecond),
+			nats.Name(user.name),
+			nats.MaxReconnects(-1),
+		)
+		defer nc.Close()
+
+		sub, err := nc.SubscribeSync("city.>")
+		require_NoError(t, err)
+		subs[acc] = &namedSub{user.name, sub}
+	}
+
+	nc := natsConnect(t, s.ClientURL(), mainCreds, nats.ReconnectWait(15*time.Millisecond), nats.MaxReconnects(-1))
+	defer nc.Close()
+
+	send := func(t *testing.T) {
+		t.Helper()
+		for i := 0; i < maxAccounts; i++ {
+			nc.Publish(fmt.Sprintf("city.%d-1.A4BDB048-69DC-4F10-916C-2B998249DC11", i), []byte(fmt.Sprintf("test:%d", i)))
+		}
+		nc.Flush()
+	}
+
+	ctx, done := context.WithCancel(context.Background())
+	defer done()
+	go func() {
+		for range time.NewTicker(200 * time.Millisecond).C {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			send(t)
+		}
+	}()
+
+	receive := func(t *testing.T) {
+		t.Helper()
+		received := 0
+		for _, nsub := range subs {
+			// Drain first any pending messages.
+			pendingMsgs, _, _ := nsub.sub.Pending()
+			for i, _ := 0, 0; i < pendingMsgs; i++ {
+				nsub.sub.NextMsg(500 * time.Millisecond)
+			}
+
+			_, err = nsub.sub.NextMsg(500 * time.Millisecond)
+			if err != nil {
+				t.Logf("WRN: Failed to receive message on account %q: %v", nsub.name, err)
+			} else {
+				received++
+			}
+		}
+		if received < (maxAccounts / 2) {
+			t.Fatalf("Too many missed messages after restart. Received %d", received)
+		}
+	}
+	receive(t)
+	time.Sleep(1 * time.Second)
+
+	restart := func(t *testing.T) *Server {
+		t.Helper()
+		s.Shutdown()
+		s.WaitForShutdown()
+		s, _ = RunServerWithConfig(conf)
+
+		hctx, hcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer hcancel()
+		for range time.NewTicker(2 * time.Second).C {
+			select {
+			case <-hctx.Done():
+				t.Logf("WRN: Timed out waiting for healthz from %s", s)
+			default:
+			}
+
+			status := s.healthz(nil)
+			if status.StatusCode == 200 {
+				return s
+			}
+		}
+		return nil
+	}
+
+	// Takes a few restarts for issue to show up.
+	for i := 0; i < 5; i++ {
+		s := restart(t)
+		defer s.Shutdown()
+		time.Sleep(2 * time.Second)
+		receive(t)
 	}
 }

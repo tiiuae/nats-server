@@ -15,14 +15,16 @@ package server
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -173,6 +175,10 @@ const (
 	// JSApiRequestNextT is the prefix for the request next message(s) for a consumer in worker/pull mode.
 	JSApiRequestNextT = "$JS.API.CONSUMER.MSG.NEXT.%s.%s"
 
+	// JSApiConsumerUnpinT is the prefix for unpinning subscription for a given consumer.
+	JSApiConsumerUnpin  = "$JS.API.CONSUMER.UNPIN.*.*"
+	JSApiConsumerUnpinT = "$JS.API.CONSUMER.UNPIN.%s.%s"
+
 	// jsRequestNextPre
 	jsRequestNextPre = "$JS.API.CONSUMER.MSG.NEXT."
 
@@ -264,14 +270,20 @@ const (
 	// JSAdvisoryStreamUpdatedPre notification that a stream was updated.
 	JSAdvisoryStreamUpdatedPre = "$JS.EVENT.ADVISORY.STREAM.UPDATED"
 
-	// JSAdvisoryConsumerCreatedPre notification that a template created.
+	// JSAdvisoryConsumerCreatedPre notification that a consumer was created.
 	JSAdvisoryConsumerCreatedPre = "$JS.EVENT.ADVISORY.CONSUMER.CREATED"
 
-	// JSAdvisoryConsumerDeletedPre notification that a template deleted.
+	// JSAdvisoryConsumerDeletedPre notification that a consumer was deleted.
 	JSAdvisoryConsumerDeletedPre = "$JS.EVENT.ADVISORY.CONSUMER.DELETED"
 
 	// JSAdvisoryConsumerPausePre notification that a consumer paused/unpaused.
 	JSAdvisoryConsumerPausePre = "$JS.EVENT.ADVISORY.CONSUMER.PAUSE"
+
+	// JSAdvisoryConsumerPinnedPre notification that a consumer was pinned.
+	JSAdvisoryConsumerPinnedPre = "$JS.EVENT.ADVISORY.CONSUMER.PINNED"
+
+	// JSAdvisoryConsumerUnpinnedPre notification that a consumer was unpinned.
+	JSAdvisoryConsumerUnpinnedPre = "$JS.EVENT.ADVISORY.CONSUMER.UNPINNED"
 
 	// JSAdvisoryStreamSnapshotCreatePre notification that a snapshot was created.
 	JSAdvisoryStreamSnapshotCreatePre = "$JS.EVENT.ADVISORY.STREAM.SNAPSHOT_CREATE"
@@ -305,6 +317,9 @@ const (
 
 	// JSAdvisoryServerRemoved notification that a server has been removed from the system.
 	JSAdvisoryServerRemoved = "$JS.EVENT.ADVISORY.SERVER.REMOVED"
+
+	// JSAdvisoryAPILimitReached notification that a server has reached the JS API hard limit.
+	JSAdvisoryAPILimitReached = "$JS.EVENT.ADVISORY.API.LIMIT_REACHED"
 
 	// JSAuditAdvisory is a notification about JetStream API access.
 	// FIXME - Add in details about who..
@@ -352,6 +367,10 @@ const JSMaxMetadataLen = 128 * 1024
 // JSMaxNameLen is the maximum name lengths for streams, consumers and templates.
 // Picked 255 as it seems to be a widely used file name limit
 const JSMaxNameLen = 255
+
+// JSDefaultRequestQueueLimit is the default number of entries that we will
+// put on the global request queue before we react.
+const JSDefaultRequestQueueLimit = 10_000
 
 // Responses for API calls.
 
@@ -494,6 +513,16 @@ type JSApiStreamPurgeResponse struct {
 }
 
 const JSApiStreamPurgeResponseType = "io.nats.jetstream.api.v1.stream_purge_response"
+
+type JSApiConsumerUnpinRequest struct {
+	Group string `json:"group"`
+}
+
+type JSApiConsumerUnpinResponse struct {
+	ApiResponse
+}
+
+const JSApiConsumerUnpinResponseType = "io.nats.jetstream.api.v1.consumer_unpin_response"
 
 // JSApiStreamUpdateResponse for updating a stream.
 type JSApiStreamUpdateResponse struct {
@@ -732,6 +761,7 @@ type JSApiConsumerGetNextRequest struct {
 	MaxBytes  int           `json:"max_bytes,omitempty"`
 	NoWait    bool          `json:"no_wait,omitempty"`
 	Heartbeat time.Duration `json:"idle_heartbeat,omitempty"`
+	PriorityGroup
 }
 
 // JSApiStreamTemplateCreateResponse for creating templates.
@@ -861,10 +891,22 @@ func (js *jetStream) apiDispatch(sub *subscription, c *client, acc *Account, sub
 	// Copy the state. Note the JSAPI only uses the hdr index to piece apart the
 	// header from the msg body. No other references are needed.
 	// Check pending and warn if getting backed up.
-	const warnThresh = 32
-	pending := s.jsAPIRoutedReqs.push(&jsAPIRoutedReq{jsub, sub, acc, subject, reply, copyBytes(rmsg), c.pa})
-	if pending > warnThresh {
-		s.RateLimitWarnf("JetStream request queue has high pending count: %d", pending)
+	pending, _ := s.jsAPIRoutedReqs.push(&jsAPIRoutedReq{jsub, sub, acc, subject, reply, copyBytes(rmsg), c.pa})
+	limit := atomic.LoadInt64(&js.queueLimit)
+	if pending >= int(limit) {
+		s.rateLimitFormatWarnf("JetStream API queue limit reached, dropping %d requests", pending)
+		s.jsAPIRoutedReqs.drain()
+
+		s.publishAdvisory(nil, JSAdvisoryAPILimitReached, JSAPILimitReachedAdvisory{
+			TypedEvent: TypedEvent{
+				Type: JSAPILimitReachedAdvisoryType,
+				ID:   nuid.Next(),
+				Time: time.Now().UTC(),
+			},
+			Server:  s.Name(),
+			Domain:  js.config.Domain,
+			Dropped: int64(pending),
+		})
 	}
 }
 
@@ -959,6 +1001,7 @@ func (s *Server) setJetStreamExportSubs() error {
 		{JSApiConsumerInfo, s.jsConsumerInfoRequest},
 		{JSApiConsumerDelete, s.jsConsumerDeleteRequest},
 		{JSApiConsumerPause, s.jsConsumerPauseRequest},
+		{JSApiConsumerUnpin, s.jsConsumerUnpinRequest},
 	}
 
 	js.mu.Lock()
@@ -992,30 +1035,128 @@ func (s *Server) sendAPIErrResponse(ci *ClientInfo, acc *Account, subject, reply
 
 const errRespDelay = 500 * time.Millisecond
 
-func (s *Server) sendDelayedAPIErrResponse(ci *ClientInfo, acc *Account, subject, reply, request, response string, rg *raftGroup) {
-	js := s.getJetStream()
-	if js == nil {
+type delayedAPIResponse struct {
+	ci       *ClientInfo
+	acc      *Account
+	subject  string
+	reply    string
+	request  string
+	response string
+	rg       *raftGroup
+	deadline time.Time
+	next     *delayedAPIResponse
+}
+
+// Add `r` in the list that is maintained ordered by the `delayedAPIResponse.deadline` time.
+func addDelayedResponse(head, tail **delayedAPIResponse, r *delayedAPIResponse) {
+	// Check if list empty.
+	if *head == nil {
+		*head, *tail = r, r
 		return
 	}
-	var quitCh <-chan struct{}
-	js.mu.RLock()
-	if rg != nil && rg.node != nil {
-		quitCh = rg.node.QuitC()
+	// Check if it should be added at the end, which is if after or equal to the tail.
+	if r.deadline.After((*tail).deadline) || r.deadline.Equal((*tail).deadline) {
+		(*tail).next, *tail = r, r
+		return
 	}
-	js.mu.RUnlock()
-
-	s.startGoRoutine(func() {
-		defer s.grWG.Done()
-		select {
-		case <-quitCh:
-		case <-s.quitCh:
-		case <-time.After(errRespDelay):
-			acc.trackAPIErr()
-			if reply != _EMPTY_ {
-				s.sendInternalAccountMsg(nil, reply, response)
+	// Find its spot in the list.
+	var prev *delayedAPIResponse
+	for c := *head; c != nil; c = c.next {
+		// We insert only if we are stricly before the current `c`.
+		if r.deadline.Before(c.deadline) {
+			r.next = c
+			if prev != nil {
+				prev.next = r
+			} else {
+				*head = r
 			}
-			s.sendJetStreamAPIAuditAdvisory(ci, acc, subject, request, response)
+			return
 		}
+		prev = c
+	}
+}
+
+func (s *Server) delayedAPIResponder() {
+	defer s.grWG.Done()
+	var (
+		head, tail *delayedAPIResponse // Linked list.
+		r          *delayedAPIResponse // Updated by calling next().
+		rqch       <-chan struct{}     // Quit channel of the Raft group (if present).
+		tm         = time.NewTimer(time.Hour)
+	)
+	next := func() {
+		r, rqch = nil, nil
+		// Check that JetStream is still on. Do not exit the go routine
+		// since JS can be enabled/disabled. The go routine will exit
+		// only if server is shutdown.
+		js := s.getJetStream()
+		if js == nil {
+			// Reset head and tail here. Also drain the ipQueue.
+			head, tail = nil, nil
+			s.delayedAPIResponses.drain()
+			// Fall back into next "if" that resets timer.
+		}
+		// If there are no delayed messages then delay the timer for
+		// a while.
+		if head == nil {
+			tm.Reset(time.Hour)
+			return
+		}
+		// Get the first expected message and then reset the timer.
+		r = head
+		js.mu.RLock()
+		if r.rg != nil && r.rg.node != nil {
+			// If there's an attached Raft group to the delayed response
+			// then pull out the quit channel, so that we don't bother
+			// sending responses for entities which are now no longer
+			// running.
+			rqch = r.rg.node.QuitC()
+		}
+		js.mu.RUnlock()
+		tm.Reset(time.Until(r.deadline))
+	}
+	pop := func() {
+		if head == nil {
+			return
+		}
+		head = head.next
+		if head == nil {
+			tail = nil
+		}
+	}
+	for {
+		select {
+		case <-s.delayedAPIResponses.ch:
+			v, ok := s.delayedAPIResponses.popOne()
+			if !ok {
+				continue
+			}
+			// Add it to the list, and if ends up being the head, set things up.
+			addDelayedResponse(&head, &tail, v)
+			if v == head {
+				next()
+			}
+		case <-s.quitCh:
+			return
+		case <-rqch:
+			// If we were the head, drop and setup things for next.
+			if r != nil && r == head {
+				pop()
+			}
+			next()
+		case <-tm.C:
+			if r != nil {
+				s.sendAPIErrResponse(r.ci, r.acc, r.subject, r.reply, r.request, r.response)
+				pop()
+			}
+			next()
+		}
+	}
+}
+
+func (s *Server) sendDelayedAPIErrResponse(ci *ClientInfo, acc *Account, subject, reply, request, response string, rg *raftGroup, duration time.Duration) {
+	s.delayedAPIResponses.push(&delayedAPIResponse{
+		ci, acc, subject, reply, request, response, rg, time.Now().Add(duration), nil,
 	})
 }
 
@@ -1044,6 +1185,32 @@ func (s *Server) getRequestInfo(c *client, raw []byte) (pci *ClientInfo, acc *Ac
 		return nil, nil, nil, nil, ErrMissingAccount
 	}
 	return &ci, acc, hdr, msg, nil
+}
+
+func (s *Server) unmarshalRequest(c *client, acc *Account, subject string, msg []byte, v any) error {
+	decoder := json.NewDecoder(bytes.NewReader(msg))
+	decoder.DisallowUnknownFields()
+
+	for {
+		if err := decoder.Decode(v); err != nil {
+			if err == io.EOF {
+				return nil
+			}
+
+			var syntaxErr *json.SyntaxError
+			if errors.As(err, &syntaxErr) {
+				err = fmt.Errorf("%w at offset %d", err, syntaxErr.Offset)
+			}
+
+			c.RateLimitWarnf("Invalid JetStream request '%s > %s': %s", acc, subject, err)
+
+			if s.JetStreamConfig().Strict {
+				return err
+			}
+
+			return json.Unmarshal(msg, v)
+		}
+	}
 }
 
 func (a *Account) trackAPI() {
@@ -1175,8 +1342,8 @@ func (s *Server) jsTemplateCreateRequest(sub *subscription, c *client, _ *Accoun
 	}
 
 	var cfg StreamTemplateConfig
-	if err := json.Unmarshal(msg, &cfg); err != nil {
-		resp.Error = NewJSInvalidJSONError()
+	if err := s.unmarshalRequest(c, acc, subject, msg, &cfg); err != nil {
+		resp.Error = NewJSInvalidJSONError(err)
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
@@ -1230,10 +1397,10 @@ func (s *Server) jsTemplateNamesRequest(sub *subscription, c *client, _ *Account
 	}
 
 	var offset int
-	if !isEmptyRequest(msg) {
+	if isJSONObjectOrArray(msg) {
 		var req JSApiStreamTemplatesRequest
-		if err := json.Unmarshal(msg, &req); err != nil {
-			resp.Error = NewJSInvalidJSONError()
+		if err := s.unmarshalRequest(c, acc, subject, msg, &req); err != nil {
+			resp.Error = NewJSInvalidJSONError(err)
 			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 			return
 		}
@@ -1241,8 +1408,8 @@ func (s *Server) jsTemplateNamesRequest(sub *subscription, c *client, _ *Account
 	}
 
 	ts := acc.templates()
-	sort.Slice(ts, func(i, j int) bool {
-		return strings.Compare(ts[i].StreamTemplateConfig.Name, ts[j].StreamTemplateConfig.Name) < 0
+	slices.SortFunc(ts, func(i, j *streamTemplate) int {
+		return cmp.Compare(i.StreamTemplateConfig.Name, j.StreamTemplateConfig.Name)
 	})
 
 	tcnt := len(ts)
@@ -1414,12 +1581,15 @@ func (s *Server) jsStreamCreateRequest(sub *subscription, c *client, _ *Account,
 		return
 	}
 
-	var cfg StreamConfig
-	if err := json.Unmarshal(msg, &cfg); err != nil {
-		resp.Error = NewJSInvalidJSONError()
+	var cfg StreamConfigRequest
+	if err := s.unmarshalRequest(c, acc, subject, msg, &cfg); err != nil {
+		resp.Error = NewJSInvalidJSONError(err)
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
+
+	// Initialize asset version metadata.
+	setStaticStreamMetadata(&cfg.StreamConfig, nil)
 
 	streamName := streamNameFromSubject(subject)
 	if streamName != cfg.Name {
@@ -1455,13 +1625,13 @@ func (s *Server) jsStreamCreateRequest(sub *subscription, c *client, _ *Account,
 		return
 	}
 
-	if err := acc.jsNonClusteredStreamLimitsCheck(&cfg); err != nil {
+	if err := acc.jsNonClusteredStreamLimitsCheck(&cfg.StreamConfig); err != nil {
 		resp.Error = err
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
 
-	mset, err := acc.addStream(&cfg)
+	mset, err := acc.addStreamPedantic(&cfg.StreamConfig, cfg.Pedantic)
 	if err != nil {
 		if IsNatsErr(err, JSStreamStoreFailedF) {
 			s.Warnf("Stream create failed for '%s > %s': %v", acc, streamName, err)
@@ -1471,10 +1641,11 @@ func (s *Server) jsStreamCreateRequest(sub *subscription, c *client, _ *Account,
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
+	msetCfg := mset.config()
 	resp.StreamInfo = &StreamInfo{
 		Created:   mset.createdTime(),
 		State:     mset.state(),
-		Config:    mset.config(),
+		Config:    *setDynamicStreamMetadata(&msetCfg),
 		TimeStamp: time.Now().UTC(),
 		Mirror:    mset.mirrorInfo(),
 		Sources:   mset.sourcesInfo(),
@@ -1521,14 +1692,14 @@ func (s *Server) jsStreamUpdateRequest(sub *subscription, c *client, _ *Account,
 		}
 		return
 	}
-	var ncfg StreamConfig
-	if err := json.Unmarshal(msg, &ncfg); err != nil {
-		resp.Error = NewJSInvalidJSONError()
+	var ncfg StreamConfigRequest
+	if err := s.unmarshalRequest(c, acc, subject, msg, &ncfg); err != nil {
+		resp.Error = NewJSInvalidJSONError(err)
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
 
-	cfg, apiErr := s.checkStreamCfg(&ncfg, acc)
+	cfg, apiErr := s.checkStreamCfg(&ncfg.StreamConfig, acc, ncfg.Pedantic)
 	if apiErr != nil {
 		resp.Error = apiErr
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
@@ -1545,7 +1716,7 @@ func (s *Server) jsStreamUpdateRequest(sub *subscription, c *client, _ *Account,
 	// Handle clustered version here.
 	if s.JetStreamIsClustered() {
 		// Always do in separate Go routine.
-		go s.jsClusteredStreamUpdateRequest(ci, acc, subject, reply, copyBytes(rmsg), &cfg, nil)
+		go s.jsClusteredStreamUpdateRequest(ci, acc, subject, reply, copyBytes(rmsg), &cfg, nil, ncfg.Pedantic)
 		return
 	}
 
@@ -1556,16 +1727,20 @@ func (s *Server) jsStreamUpdateRequest(sub *subscription, c *client, _ *Account,
 		return
 	}
 
-	if err := mset.update(&cfg); err != nil {
+	// Update asset version metadata.
+	setStaticStreamMetadata(&cfg, &mset.cfg)
+
+	if err := mset.updatePedantic(&cfg, ncfg.Pedantic); err != nil {
 		resp.Error = NewJSStreamUpdateError(err, Unless(err))
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
 
+	msetCfg := mset.config()
 	resp.StreamInfo = &StreamInfo{
 		Created:   mset.createdTime(),
 		State:     mset.state(),
-		Config:    mset.config(),
+		Config:    *setDynamicStreamMetadata(&msetCfg),
 		Domain:    s.getOpts().JetStreamDomain,
 		Mirror:    mset.mirrorInfo(),
 		Sources:   mset.sourcesInfo(),
@@ -1615,10 +1790,10 @@ func (s *Server) jsStreamNamesRequest(sub *subscription, c *client, _ *Account, 
 	var offset int
 	var filter string
 
-	if !isEmptyRequest(msg) {
+	if isJSONObjectOrArray(msg) {
 		var req JSApiStreamNamesRequest
-		if err := json.Unmarshal(msg, &req); err != nil {
-			resp.Error = NewJSInvalidJSONError()
+		if err := s.unmarshalRequest(c, acc, subject, msg, &req); err != nil {
+			resp.Error = NewJSInvalidJSONError(err)
 			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 			return
 		}
@@ -1662,7 +1837,7 @@ func (s *Server) jsStreamNamesRequest(sub *subscription, c *client, _ *Account, 
 		}
 		js.mu.RUnlock()
 		if len(resp.Streams) > 1 {
-			sort.Slice(resp.Streams, func(i, j int) bool { return strings.Compare(resp.Streams[i], resp.Streams[j]) < 0 })
+			slices.Sort(resp.Streams)
 		}
 		numStreams = len(resp.Streams)
 		if offset > numStreams {
@@ -1678,9 +1853,7 @@ func (s *Server) jsStreamNamesRequest(sub *subscription, c *client, _ *Account, 
 		msets := acc.filteredStreams(filter)
 		// Since we page results order matters.
 		if len(msets) > 1 {
-			sort.Slice(msets, func(i, j int) bool {
-				return strings.Compare(msets[i].cfg.Name, msets[j].cfg.Name) < 0
-			})
+			slices.SortFunc(msets, func(i, j *stream) int { return cmp.Compare(i.cfg.Name, j.cfg.Name) })
 		}
 
 		numStreams = len(msets)
@@ -1747,10 +1920,10 @@ func (s *Server) jsStreamListRequest(sub *subscription, c *client, _ *Account, s
 	var offset int
 	var filter string
 
-	if !isEmptyRequest(msg) {
+	if isJSONObjectOrArray(msg) {
 		var req JSApiStreamListRequest
-		if err := json.Unmarshal(msg, &req); err != nil {
-			resp.Error = NewJSInvalidJSONError()
+		if err := s.unmarshalRequest(c, acc, subject, msg, &req); err != nil {
+			resp.Error = NewJSInvalidJSONError(err)
 			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 			return
 		}
@@ -1777,9 +1950,7 @@ func (s *Server) jsStreamListRequest(sub *subscription, c *client, _ *Account, s
 		msets = acc.filteredStreams(filter)
 	}
 
-	sort.Slice(msets, func(i, j int) bool {
-		return strings.Compare(msets[i].cfg.Name, msets[j].cfg.Name) < 0
-	})
+	slices.SortFunc(msets, func(i, j *stream) int { return cmp.Compare(i.cfg.Name, j.cfg.Name) })
 
 	scnt := len(msets)
 	if offset > scnt {
@@ -1863,12 +2034,12 @@ func (s *Server) jsStreamInfoRequest(sub *subscription, c *client, a *Account, s
 			if js.isLeaderless() {
 				resp.Error = NewJSClusterNotAvailError()
 				// Delaying an error response gives the leader a chance to respond before us
-				s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), nil)
+				s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), nil, errRespDelay)
 			}
 			return
 		} else if isLeader && offline {
 			resp.Error = NewJSStreamOfflineError()
-			s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), nil)
+			s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), nil, errRespDelay)
 			return
 		}
 
@@ -1880,7 +2051,7 @@ func (s *Server) jsStreamInfoRequest(sub *subscription, c *client, a *Account, s
 			if js.isLeaderless() {
 				resp.Error = NewJSClusterNotAvailError()
 				// Delaying an error response gives the leader a chance to respond before us
-				s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), sa.Group)
+				s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), sa.Group, errRespDelay)
 				return
 			}
 
@@ -1919,10 +2090,10 @@ func (s *Server) jsStreamInfoRequest(sub *subscription, c *client, a *Account, s
 	var details bool
 	var subjects string
 	var offset int
-	if !isEmptyRequest(msg) {
+	if isJSONObjectOrArray(msg) {
 		var req JSApiStreamInfoRequest
-		if err := json.Unmarshal(msg, &req); err != nil {
-			resp.Error = NewJSInvalidJSONError()
+		if err := s.unmarshalRequest(c, acc, subject, msg, &req); err != nil {
+			resp.Error = NewJSInvalidJSONError(err)
 			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 			return
 		}
@@ -1947,21 +2118,11 @@ func (s *Server) jsStreamInfoRequest(sub *subscription, c *client, a *Account, s
 		}
 	}
 
-	mset.mu.RLock()
-	config := mset.cfg
-	checkAcks := config.Retention != LimitsPolicy && mset.hasLimitsSet()
-	mset.mu.RUnlock()
-
-	// Check if we are a clustered interest retention stream with limits.
-	// If so, check ack floors against our state.
-	if checkAcks {
-		mset.checkInterestState()
-	}
-
+	config := mset.config()
 	resp.StreamInfo = &StreamInfo{
 		Created:    mset.createdTime(),
 		State:      mset.stateWithDetail(details),
-		Config:     config,
+		Config:     *setDynamicStreamMetadata(&config),
 		Domain:     s.getOpts().JetStreamDomain,
 		Cluster:    js.clusterInfo(mset.raftGroup()),
 		Mirror:     mset.mirrorInfo(),
@@ -1991,7 +2152,7 @@ func (s *Server) jsStreamInfoRequest(sub *subscription, c *client, a *Account, s
 					subjs = append(subjs, subj)
 				}
 				// Sort it
-				sort.Strings(subjs)
+				slices.Sort(subjs)
 
 				if offset > len(subjs) {
 					offset = len(subjs)
@@ -2288,8 +2449,8 @@ func (s *Server) jsStreamRemovePeerRequest(sub *subscription, c *client, _ *Acco
 	}
 
 	var req JSApiStreamRemovePeerRequest
-	if err := json.Unmarshal(msg, &req); err != nil {
-		resp.Error = NewJSInvalidJSONError()
+	if err := s.unmarshalRequest(c, acc, subject, msg, &req); err != nil {
+		resp.Error = NewJSInvalidJSONError(err)
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
@@ -2368,8 +2529,8 @@ func (s *Server) jsLeaderServerRemoveRequest(sub *subscription, c *client, _ *Ac
 	}
 
 	var req JSApiMetaServerRemoveRequest
-	if err := json.Unmarshal(msg, &req); err != nil {
-		resp.Error = NewJSInvalidJSONError()
+	if err := s.unmarshalRequest(c, acc, subject, msg, &req); err != nil {
+		resp.Error = NewJSInvalidJSONError(err)
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
@@ -2471,8 +2632,8 @@ func (s *Server) jsLeaderServerStreamMoveRequest(sub *subscription, c *client, _
 	var resp = JSApiStreamUpdateResponse{ApiResponse: ApiResponse{Type: JSApiStreamUpdateResponseType}}
 
 	var req JSApiMetaServerStreamMoveRequest
-	if err := json.Unmarshal(msg, &req); err != nil {
-		resp.Error = NewJSInvalidJSONError()
+	if err := s.unmarshalRequest(c, acc, subject, msg, &req); err != nil {
+		resp.Error = NewJSInvalidJSONError(err)
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
@@ -2498,7 +2659,7 @@ func (s *Server) jsLeaderServerStreamMoveRequest(sub *subscription, c *client, _
 	if ok {
 		sa, ok := streams[streamName]
 		if ok {
-			cfg = *sa.Config
+			cfg = *sa.Config.clone()
 			streamFound = true
 			currPeers = sa.Group.Peers
 			currCluster = sa.Group.Cluster
@@ -2587,10 +2748,11 @@ func (s *Server) jsLeaderServerStreamMoveRequest(sub *subscription, c *client, _
 	cfg.Placement = origPlacement
 
 	s.Noticef("Requested move for stream '%s > %s' R=%d from %+v to %+v",
-		streamName, accName, cfg.Replicas, s.peerSetToNames(currPeers), s.peerSetToNames(peers))
+		accName, streamName, cfg.Replicas, s.peerSetToNames(currPeers), s.peerSetToNames(peers))
 
 	// We will always have peers and therefore never do a callout, therefore it is safe to call inline
-	s.jsClusteredStreamUpdateRequest(&ciNew, targetAcc.(*Account), subject, reply, rmsg, &cfg, peers)
+	// We should be fine ignoring pedantic mode here. as we do not touch configuration.
+	s.jsClusteredStreamUpdateRequest(&ciNew, targetAcc.(*Account), subject, reply, rmsg, &cfg, peers, false)
 }
 
 // Request to have the metaleader move a stream on a peer to another
@@ -2639,7 +2801,7 @@ func (s *Server) jsLeaderServerStreamCancelMoveRequest(sub *subscription, c *cli
 	if ok {
 		sa, ok := streams[streamName]
 		if ok {
-			cfg = *sa.Config
+			cfg = *sa.Config.clone()
 			streamFound = true
 			currPeers = sa.Group.Peers
 		}
@@ -2693,10 +2855,10 @@ func (s *Server) jsLeaderServerStreamCancelMoveRequest(sub *subscription, c *cli
 	}
 
 	s.Noticef("Requested cancel of move: R=%d '%s > %s' to peer set %+v and restore previous peer set %+v",
-		cfg.Replicas, streamName, accName, s.peerSetToNames(currPeers), s.peerSetToNames(peers))
+		cfg.Replicas, accName, streamName, s.peerSetToNames(currPeers), s.peerSetToNames(peers))
 
 	// We will always have peers and therefore never do a callout, therefore it is safe to call inline
-	s.jsClusteredStreamUpdateRequest(&ciNew, targetAcc.(*Account), subject, reply, rmsg, &cfg, peers)
+	s.jsClusteredStreamUpdateRequest(&ciNew, targetAcc.(*Account), subject, reply, rmsg, &cfg, peers, false)
 }
 
 // Request to have an account purged
@@ -2795,6 +2957,12 @@ func (s *Server) jsLeaderStepDownRequest(sub *subscription, c *client, _ *Accoun
 		return
 	}
 
+	// This should only be coming from the System Account.
+	if acc != s.SystemAccount() {
+		s.RateLimitWarnf("JetStream API stepdown request from non-system account: %q user: %q", ci.serviceAccount(), ci.User)
+		return
+	}
+
 	js, cc := s.getJetStreamCluster()
 	if js == nil || cc == nil || cc.meta == nil {
 		return
@@ -2812,40 +2980,42 @@ func (s *Server) jsLeaderStepDownRequest(sub *subscription, c *client, _ *Accoun
 	var preferredLeader string
 	var resp = JSApiLeaderStepDownResponse{ApiResponse: ApiResponse{Type: JSApiLeaderStepDownResponseType}}
 
-	if !isEmptyRequest(msg) {
+	if isJSONObjectOrArray(msg) {
 		var req JSApiLeaderStepdownRequest
-		if err := json.Unmarshal(msg, &req); err != nil {
-			resp.Error = NewJSInvalidJSONError()
+		if err := s.unmarshalRequest(c, acc, subject, msg, &req); err != nil {
+			resp.Error = NewJSInvalidJSONError(err)
 			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 			return
 		}
-		if len(req.Placement.Tags) > 0 {
-			// Tags currently not supported.
-			resp.Error = NewJSClusterTagsError()
-			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
-			return
-		}
-		cn := req.Placement.Cluster
-		var peers []string
-		ourID := cc.meta.ID()
-		for _, p := range cc.meta.Peers() {
-			if si, ok := s.nodeToInfo.Load(p.ID); ok && si != nil {
-				if ni := si.(nodeInfo); ni.offline || ni.cluster != cn || p.ID == ourID {
-					continue
-				}
-				peers = append(peers, p.ID)
+		if req.Placement != nil {
+			if len(req.Placement.Tags) > 0 {
+				// Tags currently not supported.
+				resp.Error = NewJSClusterTagsError()
+				s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+				return
 			}
+			cn := req.Placement.Cluster
+			var peers []string
+			ourID := cc.meta.ID()
+			for _, p := range cc.meta.Peers() {
+				if si, ok := s.nodeToInfo.Load(p.ID); ok && si != nil {
+					if ni := si.(nodeInfo); ni.offline || ni.cluster != cn || p.ID == ourID {
+						continue
+					}
+					peers = append(peers, p.ID)
+				}
+			}
+			if len(peers) == 0 {
+				resp.Error = NewJSClusterNoPeersError(fmt.Errorf("no replacement peer connected"))
+				s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+				return
+			}
+			// Randomize and select.
+			if len(peers) > 1 {
+				rand.Shuffle(len(peers), func(i, j int) { peers[i], peers[j] = peers[j], peers[i] })
+			}
+			preferredLeader = peers[0]
 		}
-		if len(peers) == 0 {
-			resp.Error = NewJSClusterNoPeersError(fmt.Errorf("no replacement peer connected"))
-			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
-			return
-		}
-		// Randomize and select.
-		if len(peers) > 1 {
-			rand.Shuffle(len(peers), func(i, j int) { peers[i], peers[j] = peers[j], peers[i] })
-		}
-		preferredLeader = peers[0]
 	}
 
 	// Call actual stepdown.
@@ -2856,6 +3026,25 @@ func (s *Server) jsLeaderStepDownRequest(sub *subscription, c *client, _ *Accoun
 		resp.Success = true
 	}
 	s.sendAPIResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(resp))
+}
+
+// Check if given []bytes is a JSON Object or Array.
+// Technically, valid JSON can also be a plain string or number, but for our use case,
+// we care only for JSON objects or arrays which starts with `[` or `{`.
+// This function does not have to ensure valid JSON in its entirety. It is used merely
+// to hint the codepath if it should attempt to parse the request as JSON or not.
+func isJSONObjectOrArray(req []byte) bool {
+	// Skip leading JSON whitespace (space, tab, newline, carriage return)
+	i := 0
+	for i < len(req) && (req[i] == ' ' || req[i] == '\t' || req[i] == '\n' || req[i] == '\r') {
+		i++
+	}
+	// Check for empty input after trimming
+	if i >= len(req) {
+		return false
+	}
+	// Check if the first non-whitespace character is '{' or '['
+	return req[i] == '{' || req[i] == '['
 }
 
 func isEmptyRequest(req []byte) bool {
@@ -3020,8 +3209,8 @@ func (s *Server) jsMsgDeleteRequest(sub *subscription, c *client, _ *Account, su
 		return
 	}
 	var req JSApiMsgDeleteRequest
-	if err := json.Unmarshal(msg, &req); err != nil {
-		resp.Error = NewJSInvalidJSONError()
+	if err := s.unmarshalRequest(c, acc, subject, msg, &req); err != nil {
+		resp.Error = NewJSInvalidJSONError(err)
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
@@ -3139,8 +3328,8 @@ func (s *Server) jsMsgGetRequest(sub *subscription, c *client, _ *Account, subje
 		return
 	}
 	var req JSApiMsgGetRequest
-	if err := json.Unmarshal(msg, &req); err != nil {
-		resp.Error = NewJSInvalidJSONError()
+	if err := s.unmarshalRequest(c, acc, subject, msg, &req); err != nil {
+		resp.Error = NewJSInvalidJSONError(err)
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
@@ -3204,6 +3393,118 @@ func (s *Server) jsMsgGetRequest(sub *subscription, c *client, _ *Account, subje
 
 	// Don't send response through API layer for this call.
 	s.sendInternalAccountMsg(nil, reply, s.jsonResponse(resp))
+}
+
+func (s *Server) jsConsumerUnpinRequest(sub *subscription, c *client, _ *Account, subject, reply string, rmsg []byte) {
+	if c == nil || !s.JetStreamEnabled() {
+		return
+	}
+
+	ci, acc, _, msg, err := s.getRequestInfo(c, rmsg)
+	if err != nil {
+		s.Warnf(badAPIRequestT, msg)
+		return
+	}
+
+	stream := streamNameFromSubject(subject)
+	consumer := consumerNameFromSubject(subject)
+
+	var req JSApiConsumerUnpinRequest
+	var resp = JSApiConsumerUnpinResponse{ApiResponse: ApiResponse{Type: JSApiConsumerUnpinResponseType}}
+
+	if err := json.Unmarshal(msg, &req); err != nil {
+		resp.Error = NewJSInvalidJSONError(err)
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		return
+	}
+
+	if req.Group == _EMPTY_ {
+		resp.Error = NewJSInvalidJSONError(errors.New("consumer group not specified"))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		return
+	}
+
+	if !validGroupName.MatchString(req.Group) {
+		resp.Error = NewJSConsumerInvalidGroupNameError()
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		return
+	}
+	if s.JetStreamIsClustered() {
+		// Check to make sure the stream is assigned.
+		js, cc := s.getJetStreamCluster()
+		if js == nil || cc == nil {
+			return
+		}
+
+		// First check if the stream and consumer is there.
+		sa := js.streamAssignment(acc.Name, stream)
+		if sa == nil {
+			resp.Error = NewJSStreamNotFoundError(Unless(err))
+			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+			return
+		}
+
+		ca, ok := sa.consumers[consumer]
+		if !ok || ca == nil {
+			resp.Error = NewJSConsumerNotFoundError()
+			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+			return
+		}
+
+		// Then check if we are the leader.
+		mset, err := acc.lookupStream(stream)
+		if err != nil {
+			return
+		}
+
+		o := mset.lookupConsumer(consumer)
+		if o == nil {
+			return
+		}
+		if !o.isLeader() {
+			return
+		}
+	}
+
+	if hasJS, doErr := acc.checkJetStream(); !hasJS {
+		if doErr {
+			resp.Error = NewJSNotEnabledForAccountError()
+			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		}
+		return
+	}
+
+	mset, err := acc.lookupStream(stream)
+	if err != nil {
+		resp.Error = NewJSStreamNotFoundError()
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		return
+	}
+	o := mset.lookupConsumer(consumer)
+	if o == nil {
+		resp.Error = NewJSConsumerNotFoundError()
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		return
+	}
+
+	var foundPriority bool
+	for _, group := range o.config().PriorityGroups {
+		if group == req.Group {
+			foundPriority = true
+			break
+		}
+	}
+	if !foundPriority {
+		resp.Error = NewJSConsumerInvalidPriorityGroupError()
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		return
+	}
+
+	o.mu.Lock()
+	o.currentPinId = _EMPTY_
+	o.sendUnpinnedAdvisoryLocked(req.Group, "admin")
+	o.mu.Unlock()
+	s.sendAPIResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(resp))
 }
 
 // Request to purge a stream.
@@ -3280,10 +3581,10 @@ func (s *Server) jsStreamPurgeRequest(sub *subscription, c *client, _ *Account, 
 	}
 
 	var purgeRequest *JSApiStreamPurgeRequest
-	if !isEmptyRequest(msg) {
+	if isJSONObjectOrArray(msg) {
 		var req JSApiStreamPurgeRequest
-		if err := json.Unmarshal(msg, &req); err != nil {
-			resp.Error = NewJSInvalidJSONError()
+		if err := s.unmarshalRequest(c, acc, subject, msg, &req); err != nil {
+			resp.Error = NewJSInvalidJSONError(err)
 			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 			return
 		}
@@ -3328,7 +3629,11 @@ func (s *Server) jsStreamPurgeRequest(sub *subscription, c *client, _ *Account, 
 }
 
 func (acc *Account) jsNonClusteredStreamLimitsCheck(cfg *StreamConfig) *ApiError {
-	selectedLimits, tier, jsa, apiErr := acc.selectLimits(cfg)
+	var replicas int
+	if cfg != nil {
+		replicas = cfg.Replicas
+	}
+	selectedLimits, tier, jsa, apiErr := acc.selectLimits(replicas)
 	if apiErr != nil {
 		return apiErr
 	}
@@ -3368,8 +3673,8 @@ func (s *Server) jsStreamRestoreRequest(sub *subscription, c *client, _ *Account
 	}
 
 	var req JSApiStreamRestoreRequest
-	if err := json.Unmarshal(msg, &req); err != nil {
-		resp.Error = NewJSInvalidJSONError()
+	if err := s.unmarshalRequest(c, acc, subject, msg, &req); err != nil {
+		resp.Error = NewJSInvalidJSONError(err)
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
@@ -3381,7 +3686,7 @@ func (s *Server) jsStreamRestoreRequest(sub *subscription, c *client, _ *Account
 	}
 
 	// check stream config at the start of the restore process, not at the end
-	cfg, apiErr := s.checkStreamCfg(&req.Config, acc)
+	cfg, apiErr := s.checkStreamCfg(&req.Config, acc, false)
 	if apiErr != nil {
 		resp.Error = apiErr
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
@@ -3590,16 +3895,17 @@ func (s *Server) processStreamRestore(ci *ClientInfo, acc *Account, cfg *StreamC
 				if err != nil {
 					resp.Error = NewJSStreamRestoreError(err, Unless(err))
 					s.Warnf("Restore failed for %s for stream '%s > %s' in %v",
-						friendlyBytes(int64(total)), streamName, acc.Name, end.Sub(start))
+						friendlyBytes(int64(total)), acc.Name, streamName, end.Sub(start))
 				} else {
+					msetCfg := mset.config()
 					resp.StreamInfo = &StreamInfo{
 						Created:   mset.createdTime(),
 						State:     mset.state(),
-						Config:    mset.config(),
+						Config:    *setDynamicStreamMetadata(&msetCfg),
 						TimeStamp: time.Now().UTC(),
 					}
 					s.Noticef("Completed restore of %s for stream '%s > %s' in %v",
-						friendlyBytes(int64(total)), streamName, acc.Name, end.Sub(start).Round(time.Millisecond))
+						friendlyBytes(int64(total)), acc.Name, streamName, end.Sub(start).Round(time.Millisecond))
 				}
 
 				// On the last EOF, send back the stream info or error status.
@@ -3670,8 +3976,8 @@ func (s *Server) jsStreamSnapshotRequest(sub *subscription, c *client, _ *Accoun
 	}
 
 	var req JSApiStreamSnapshotRequest
-	if err := json.Unmarshal(msg, &req); err != nil {
-		resp.Error = NewJSInvalidJSONError()
+	if err := s.unmarshalRequest(c, acc, subject, msg, &req); err != nil {
+		resp.Error = NewJSInvalidJSONError(err)
 		s.sendAPIErrResponse(ci, acc, subject, reply, smsg, s.jsonResponse(&resp))
 		return
 	}
@@ -3868,8 +4174,8 @@ func (s *Server) jsConsumerCreateRequest(sub *subscription, c *client, a *Accoun
 	var resp = JSApiConsumerCreateResponse{ApiResponse: ApiResponse{Type: JSApiConsumerCreateResponseType}}
 
 	var req CreateConsumerRequest
-	if err := json.Unmarshal(msg, &req); err != nil {
-		resp.Error = NewJSInvalidJSONError()
+	if err := s.unmarshalRequest(c, acc, subject, msg, &req); err != nil {
+		resp.Error = NewJSInvalidJSONError(err)
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
@@ -4014,9 +4320,9 @@ func (s *Server) jsConsumerCreateRequest(sub *subscription, c *client, a *Accoun
 		// during this call, so place in Go routine to not block client.
 		// Router and Gateway API calls already in separate context.
 		if c.kind != ROUTER && c.kind != GATEWAY {
-			go s.jsClusteredConsumerRequest(ci, acc, subject, reply, rmsg, req.Stream, &req.Config, req.Action)
+			go s.jsClusteredConsumerRequest(ci, acc, subject, reply, rmsg, req.Stream, &req.Config, req.Action, req.Pedantic)
 		} else {
-			s.jsClusteredConsumerRequest(ci, acc, subject, reply, rmsg, req.Stream, &req.Config, req.Action)
+			s.jsClusteredConsumerRequest(ci, acc, subject, reply, rmsg, req.Stream, &req.Config, req.Action, req.Pedantic)
 		}
 		return
 	}
@@ -4035,13 +4341,18 @@ func (s *Server) jsConsumerCreateRequest(sub *subscription, c *client, a *Accoun
 		return
 	}
 
-	// If the consumer already exists then don't allow updating the PauseUntil, just set
-	// it back to whatever the current configured value is.
+	var oldCfg *ConsumerConfig
 	if o := stream.lookupConsumer(consumerName); o != nil {
+		oldCfg = &o.cfg
+		// If the consumer already exists then don't allow updating the PauseUntil, just set
+		// it back to whatever the current configured value is.
 		req.Config.PauseUntil = o.cfg.PauseUntil
 	}
 
-	o, err := stream.addConsumerWithAction(&req.Config, req.Action)
+	// Initialize/update asset version metadata.
+	setStaticConsumerMetadata(&req.Config, oldCfg)
+
+	o, err := stream.addConsumerWithAction(&req.Config, req.Action, req.Pedantic)
 
 	if err != nil {
 		if IsNatsErr(err, JSConsumerStoreFailedErrF) {
@@ -4053,7 +4364,7 @@ func (s *Server) jsConsumerCreateRequest(sub *subscription, c *client, a *Accoun
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
-	resp.ConsumerInfo = o.initialInfo()
+	resp.ConsumerInfo = setDynamicConsumerInfoMetadata(o.initialInfo())
 	s.sendAPIResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(resp))
 
 	if o.cfg.PauseUntil != nil && !o.cfg.PauseUntil.IsZero() && time.Now().Before(*o.cfg.PauseUntil) {
@@ -4103,10 +4414,10 @@ func (s *Server) jsConsumerNamesRequest(sub *subscription, c *client, _ *Account
 	}
 
 	var offset int
-	if !isEmptyRequest(msg) {
+	if isJSONObjectOrArray(msg) {
 		var req JSApiConsumersRequest
-		if err := json.Unmarshal(msg, &req); err != nil {
-			resp.Error = NewJSInvalidJSONError()
+		if err := s.unmarshalRequest(c, acc, subject, msg, &req); err != nil {
+			resp.Error = NewJSInvalidJSONError(err)
 			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 			return
 		}
@@ -4141,7 +4452,7 @@ func (s *Server) jsConsumerNamesRequest(sub *subscription, c *client, _ *Account
 			resp.Consumers = append(resp.Consumers, consumer)
 		}
 		if len(resp.Consumers) > 1 {
-			sort.Slice(resp.Consumers, func(i, j int) bool { return strings.Compare(resp.Consumers[i], resp.Consumers[j]) < 0 })
+			slices.Sort(resp.Consumers)
 		}
 		numConsumers = len(resp.Consumers)
 		if offset > numConsumers {
@@ -4162,9 +4473,7 @@ func (s *Server) jsConsumerNamesRequest(sub *subscription, c *client, _ *Account
 		}
 
 		obs := mset.getPublicConsumers()
-		sort.Slice(obs, func(i, j int) bool {
-			return strings.Compare(obs[i].name, obs[j].name) < 0
-		})
+		slices.SortFunc(obs, func(i, j *consumer) int { return cmp.Compare(i.name, j.name) })
 
 		numConsumers = len(obs)
 		if offset > numConsumers {
@@ -4227,10 +4536,10 @@ func (s *Server) jsConsumerListRequest(sub *subscription, c *client, _ *Account,
 	}
 
 	var offset int
-	if !isEmptyRequest(msg) {
+	if isJSONObjectOrArray(msg) {
 		var req JSApiConsumersRequest
-		if err := json.Unmarshal(msg, &req); err != nil {
-			resp.Error = NewJSInvalidJSONError()
+		if err := s.unmarshalRequest(c, acc, subject, msg, &req); err != nil {
+			resp.Error = NewJSInvalidJSONError(err)
 			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 			return
 		}
@@ -4257,9 +4566,7 @@ func (s *Server) jsConsumerListRequest(sub *subscription, c *client, _ *Account,
 	}
 
 	obs := mset.getPublicConsumers()
-	sort.Slice(obs, func(i, j int) bool {
-		return strings.Compare(obs[i].name, obs[j].name) < 0
-	})
+	slices.SortFunc(obs, func(i, j *consumer) int { return cmp.Compare(i.name, j.name) })
 
 	ocnt := len(obs)
 	if offset > ocnt {
@@ -4302,7 +4609,7 @@ func (s *Server) jsConsumerInfoRequest(sub *subscription, c *client, _ *Account,
 		return
 	}
 
-	// If we are in clustered mode we need to be the stream leader to proceed.
+	// If we are in clustered mode we need to be the consumer leader to proceed.
 	if s.JetStreamIsClustered() {
 		// Check to make sure the consumer is assigned.
 		js, cc := s.getJetStreamCluster()
@@ -4352,12 +4659,12 @@ func (s *Server) jsConsumerInfoRequest(sub *subscription, c *client, _ *Account,
 			if isLeaderLess {
 				resp.Error = NewJSClusterNotAvailError()
 				// Delaying an error response gives the leader a chance to respond before us
-				s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), nil)
+				s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), nil, errRespDelay)
 			}
 			return
 		} else if isLeader && offline {
 			resp.Error = NewJSConsumerOfflineError()
-			s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), nil)
+			s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), nil, errRespDelay)
 			return
 		}
 
@@ -4373,7 +4680,7 @@ func (s *Server) jsConsumerInfoRequest(sub *subscription, c *client, _ *Account,
 			if isLeaderLess {
 				resp.Error = NewJSClusterNotAvailError()
 				// Delaying an error response gives the leader a chance to respond before us
-				s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), ca.Group)
+				s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), ca.Group, errRespDelay)
 				return
 			}
 
@@ -4403,7 +4710,7 @@ func (s *Server) jsConsumerInfoRequest(sub *subscription, c *client, _ *Account,
 						Stream:    ca.Stream,
 						Name:      ca.Name,
 						Created:   ca.Created,
-						Config:    ca.Config,
+						Config:    setDynamicConsumerMetadata(ca.Config),
 						TimeStamp: time.Now().UTC(),
 					}
 					b := s.jsonResponse(resp)
@@ -4416,7 +4723,7 @@ func (s *Server) jsConsumerInfoRequest(sub *subscription, c *client, _ *Account,
 			if node.GroupLeader() != _EMPTY_ || node.HadPreviousLeader() {
 				if leaderNotPartOfGroup {
 					resp.Error = NewJSConsumerOfflineError()
-					s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), nil)
+					s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), nil, errRespDelay)
 				}
 				return
 			}
@@ -4446,7 +4753,7 @@ func (s *Server) jsConsumerInfoRequest(sub *subscription, c *client, _ *Account,
 		return
 	}
 
-	if resp.ConsumerInfo = obs.info(); resp.ConsumerInfo == nil {
+	if resp.ConsumerInfo = setDynamicConsumerInfoMetadata(obs.info()); resp.ConsumerInfo == nil {
 		// This consumer returned nil which means it's closed. Respond with not found.
 		resp.Error = NewJSConsumerNotFoundError()
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
@@ -4541,9 +4848,9 @@ func (s *Server) jsConsumerPauseRequest(sub *subscription, c *client, _ *Account
 	var req JSApiConsumerPauseRequest
 	var resp = JSApiConsumerPauseResponse{ApiResponse: ApiResponse{Type: JSApiConsumerPauseResponseType}}
 
-	if !isEmptyRequest(msg) {
-		if err := json.Unmarshal(msg, &req); err != nil {
-			resp.Error = NewJSInvalidJSONError()
+	if isJSONObjectOrArray(msg) {
+		if err := s.unmarshalRequest(c, acc, subject, msg, &req); err != nil {
+			resp.Error = NewJSInvalidJSONError(err)
 			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 			return
 		}
@@ -4597,7 +4904,14 @@ func (s *Server) jsConsumerPauseRequest(sub *subscription, c *client, _ *Account
 		pauseUTC := req.PauseUntil.UTC()
 		if !pauseUTC.IsZero() {
 			nca.Config.PauseUntil = &pauseUTC
+		} else {
+			nca.Config.PauseUntil = nil
 		}
+
+		// Update asset version metadata due to updating pause/resume.
+		// Only PauseUntil is updated above, so reuse config for both.
+		setStaticConsumerMetadata(nca.Config, nca.Config)
+
 		eca := encodeAddConsumerAssignment(&nca)
 		cc.meta.Propose(eca)
 
@@ -4630,6 +4944,10 @@ func (s *Server) jsConsumerPauseRequest(sub *subscription, c *client, _ *Account
 	} else {
 		ncfg.PauseUntil = nil
 	}
+
+	// Update asset version metadata due to updating pause/resume.
+	// Only PauseUntil is updated above, so reuse config for both.
+	setStaticConsumerMetadata(&ncfg, &ncfg)
 
 	if err := obs.updateConfig(&ncfg); err != nil {
 		// The only type of error that should be returned here is from o.store,

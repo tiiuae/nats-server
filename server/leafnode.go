@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
 	"net/http"
@@ -104,13 +105,14 @@ type leaf struct {
 type leafNodeCfg struct {
 	sync.RWMutex
 	*RemoteLeafOpts
-	urls      []*url.URL
-	curURL    *url.URL
-	tlsName   string
-	username  string
-	password  string
-	perms     *Permissions
-	connDelay time.Duration // Delay before a connect, could be used while detecting loop condition, etc..
+	urls           []*url.URL
+	curURL         *url.URL
+	tlsName        string
+	username       string
+	password       string
+	perms          *Permissions
+	connDelay      time.Duration // Delay before a connect, could be used while detecting loop condition, etc..
+	jsMigrateTimer *time.Timer
 }
 
 // Check to see if this is a solicited leafnode. We do special processing for solicited.
@@ -492,14 +494,15 @@ func (s *Server) connectToRemoteLeafNode(remote *leafNodeCfg, firstConnect bool)
 
 	opts := s.getOpts()
 	reconnectDelay := opts.LeafNode.ReconnectInterval
-	s.mu.Lock()
+	s.mu.RLock()
 	dialTimeout := s.leafNodeOpts.dialTimeout
 	resolver := s.leafNodeOpts.resolver
 	var isSysAcc bool
 	if s.eventsEnabled() {
 		isSysAcc = remote.LocalAccount == s.sys.account.Name
 	}
-	s.mu.Unlock()
+	jetstreamMigrateDelay := remote.JetStreamClusterMigrateDelay
+	s.mu.RUnlock()
 
 	// If we are sharing a system account and we are not standalone delay to gather some info prior.
 	if firstConnect && isSysAcc && !s.standAloneMode() {
@@ -521,6 +524,7 @@ func (s *Server) connectToRemoteLeafNode(remote *leafNodeCfg, firstConnect bool)
 	const connErrFmt = "Error trying to connect as leafnode to remote server %q (attempt %v): %v"
 
 	attempts := 0
+
 	for s.isRunning() && s.remoteLeafNodeStillValid(remote) {
 		rURL := remote.pickNextURL()
 		url, err := s.getRandomIP(resolver, rURL.Host, nil)
@@ -555,15 +559,28 @@ func (s *Server) connectToRemoteLeafNode(remote *leafNodeCfg, firstConnect bool)
 			} else {
 				s.Debugf(connErrFmt, rURL.Host, attempts, err)
 			}
+			remote.Lock()
+			// if we are using a delay to start migrating assets, kick off a migrate timer.
+			if remote.jsMigrateTimer == nil && jetstreamMigrateDelay > 0 {
+				remote.jsMigrateTimer = time.AfterFunc(jetstreamMigrateDelay, func() {
+					s.checkJetStreamMigrate(remote)
+				})
+			}
+			remote.Unlock()
 			select {
 			case <-s.quitCh:
+				remote.cancelMigrateTimer()
 				return
 			case <-time.After(delay):
-				// Check if we should migrate any JetStream assets while this remote is down.
-				s.checkJetStreamMigrate(remote)
+				// Check if we should migrate any JetStream assets immediately while this remote is down.
+				// This will be used if JetStreamClusterMigrateDelay was not set
+				if jetstreamMigrateDelay == 0 {
+					s.checkJetStreamMigrate(remote)
+				}
 				continue
 			}
 		}
+		remote.cancelMigrateTimer()
 		if !s.remoteLeafNodeStillValid(remote) {
 			conn.Close()
 			return
@@ -580,6 +597,12 @@ func (s *Server) connectToRemoteLeafNode(remote *leafNodeCfg, firstConnect bool)
 	}
 }
 
+func (cfg *leafNodeCfg) cancelMigrateTimer() {
+	cfg.Lock()
+	stopAndClearTimer(&cfg.jsMigrateTimer)
+	cfg.Unlock()
+}
+
 // This will clear any observer state such that stream or consumer assets on this server can become leaders again.
 func (s *Server) clearObserverState(remote *leafNodeCfg) {
 	s.mu.RLock()
@@ -591,6 +614,9 @@ func (s *Server) clearObserverState(remote *leafNodeCfg) {
 		s.Warnf("Error looking up account [%s] checking for JetStream clear observer state on a leafnode", accName)
 		return
 	}
+
+	acc.jscmMu.Lock()
+	defer acc.jscmMu.Unlock()
 
 	// Walk all streams looking for any clustered stream, skip otherwise.
 	for _, mset := range acc.streams() {
@@ -626,6 +652,9 @@ func (s *Server) checkJetStreamMigrate(remote *leafNodeCfg) {
 		s.Warnf("Error looking up account [%s] checking for JetStream migration on a leafnode", accName)
 		return
 	}
+
+	acc.jscmMu.Lock()
+	defer acc.jscmMu.Unlock()
 
 	// Walk all streams looking for any clustered stream, skip otherwise.
 	// If we are the leader force stepdown.
@@ -1012,7 +1041,11 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 	c.initClient()
 	c.Noticef("Leafnode connection created%s %s", remoteSuffix, c.opts.Name)
 
-	var tlsFirst bool
+	var (
+		tlsFirst         bool
+		tlsFirstFallback time.Duration
+		infoTimeout      time.Duration
+	)
 	if remote != nil {
 		solicited = true
 		remote.Lock()
@@ -1022,12 +1055,17 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 			c.leaf.isSpoke = true
 		}
 		tlsFirst = !quic && remote.TLSHandshakeFirst
+		infoTimeout = remote.FirstInfoTimeout
 		remote.Unlock()
 		c.acc = acc
 	} else {
 		c.flags.set(expectConnect)
 		if ws != nil {
 			c.Debugf("Leafnode compression=%v", c.ws.compress)
+		}
+		tlsFirst = !quic && opts.LeafNode.TLSHandshakeFirst
+		if f := opts.LeafNode.TLSHandshakeFirstFallback; !quic && f > 0 {
+			tlsFirstFallback = f
 		}
 	}
 	c.mu.Unlock()
@@ -1072,14 +1110,14 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 			}
 		} else {
 			// If configured to do TLS handshake first
-			if !quic && tlsFirst {
+			if tlsFirst {
 				if _, err := c.leafClientHandshakeIfNeeded(remote, opts); err != nil {
 					c.mu.Unlock()
 					return nil
 				}
 			}
 			// We need to wait for the info, but not for too long.
-			c.nc.SetReadDeadline(time.Now().Add(DEFAULT_LEAFNODE_INFO_WAIT))
+			c.nc.SetReadDeadline(time.Now().Add(infoTimeout))
 		}
 
 		// We will process the INFO from the readloop and finish by
@@ -1092,7 +1130,33 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 		info.Nonce = bytesToString(c.nonce)
 		info.CID = c.cid
 		proto := generateInfoJSON(info)
-		if !quic && !opts.LeafNode.TLSHandshakeFirst {
+
+		var pre []byte
+		// We need first to check for "TLS First" fallback delay.
+		if tlsFirstFallback > 0 {
+			// We wait and see if we are getting any data. Since we did not send
+			// the INFO protocol yet, only clients that use TLS first should be
+			// sending data (the TLS handshake). We don't really check the content:
+			// if it is a rogue agent and not an actual client performing the
+			// TLS handshake, the error will be detected when performing the
+			// handshake on our side.
+			pre = make([]byte, 4)
+			c.nc.SetReadDeadline(time.Now().Add(tlsFirstFallback))
+			n, _ := io.ReadFull(c.nc, pre[:])
+			c.nc.SetReadDeadline(time.Time{})
+			// If we get any data (regardless of possible timeout), we will proceed
+			// with the TLS handshake.
+			if n > 0 {
+				pre = pre[:n]
+			} else {
+				// We did not get anything so we will send the INFO protocol.
+				pre = nil
+				// Set the boolean to false for the rest of the function.
+				tlsFirst = false
+			}
+		}
+
+		if !tlsFirst {
 			// We have to send from this go routine because we may
 			// have to block for TLS handshake before we start our
 			// writeLoop go routine. The other side needs to receive
@@ -1109,6 +1173,10 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 
 		// Check to see if we need to spin up TLS.
 		if !quic && !c.isWebsocket() && info.TLSRequired {
+			// If we have a prebuffer create a multi-reader.
+			if len(pre) > 0 {
+				c.nc = &tlsMixConn{c.nc, bytes.NewBuffer(pre)}
+			}
 			// Perform server-side TLS handshake.
 			if err := c.doTLSServerHandshake(tlsHandshakeLeaf, opts.LeafNode.TLSConfig, opts.LeafNode.TLSTimeout, opts.LeafNode.TLSPinnedCerts); err != nil {
 				c.mu.Unlock()
@@ -1118,7 +1186,8 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 
 		// If the user wants the TLS handshake to occur first, now that it is
 		// done, send the INFO protocol.
-		if quic || opts.LeafNode.TLSHandshakeFirst {
+		if quic || tlsFirst {
+			c.flags.set(didTLSFirst)
 			c.sendProtoNow(proto)
 			if c.isClosed() {
 				c.mu.Unlock()
@@ -1314,6 +1383,13 @@ func (c *client) processLeafnodeInfo(info *Info) {
 			c.mu.Unlock()
 			c.Errorf(ErrConnectedToWrongPort.Error())
 			c.closeConnection(WrongPort)
+			return
+		}
+		// Reject a cluster that contains spaces.
+		if info.Cluster != _EMPTY_ && strings.Contains(info.Cluster, " ") {
+			c.mu.Unlock()
+			c.sendErrAndErr(ErrClusterNameHasSpaces.Error())
+			c.closeConnection(ProtocolViolation)
 			return
 		}
 		// Capture a nonce here.
@@ -1809,6 +1885,13 @@ func (c *client) processLeafNodeConnect(s *Server, arg []byte, lang string) erro
 	proto := &leafConnectInfo{}
 	if err := json.Unmarshal(arg, proto); err != nil {
 		return err
+	}
+
+	// Reject a cluster that contains spaces.
+	if proto.Cluster != _EMPTY_ && strings.Contains(proto.Cluster, " ") {
+		c.sendErrAndErr(ErrClusterNameHasSpaces.Error())
+		c.closeConnection(ProtocolViolation)
+		return ErrClusterNameHasSpaces
 	}
 
 	// Check for cluster name collisions.
@@ -2716,9 +2799,8 @@ func (c *client) processInboundLeafMsg(msg []byte) {
 	// Go back to the sublist data structure.
 	if !ok {
 		r = c.acc.sl.Match(subject)
-		c.in.results[subject] = r
 		// Prune the results cache. Keeps us from unbounded growth. Random delete.
-		if len(c.in.results) > maxResultCacheSize {
+		if len(c.in.results) >= maxResultCacheSize {
 			n := 0
 			for subj := range c.in.results {
 				delete(c.in.results, subj)
@@ -2727,6 +2809,8 @@ func (c *client) processInboundLeafMsg(msg []byte) {
 				}
 			}
 		}
+		// Then add the new cache entry.
+		c.in.results[subject] = r
 	}
 
 	// Collect queue names if needed.
@@ -2871,6 +2955,7 @@ func (c *client) leafNodeSolicitWSConnection(opts *Options, rURL *url.URL, remot
 	compress := remote.Websocket.Compression
 	// By default the server will mask outbound frames, but it can be disabled with this option.
 	noMasking := remote.Websocket.NoMasking
+	infoTimeout := remote.FirstInfoTimeout
 	remote.RUnlock()
 	// Will do the client-side TLS handshake if needed.
 	tlsRequired, err := c.leafClientHandshakeIfNeeded(remote, opts)
@@ -2923,6 +3008,7 @@ func (c *client) leafNodeSolicitWSConnection(opts *Options, rURL *url.URL, remot
 	if noMasking {
 		req.Header.Add(wsNoMaskingHeader, wsNoMaskingValue)
 	}
+	c.nc.SetDeadline(time.Now().Add(infoTimeout))
 	if err := req.Write(c.nc); err != nil {
 		return nil, WriteError, err
 	}
@@ -2930,7 +3016,6 @@ func (c *client) leafNodeSolicitWSConnection(opts *Options, rURL *url.URL, remot
 	var resp *http.Response
 
 	br := bufio.NewReaderSize(c.nc, MAX_CONTROL_LINE_SIZE)
-	c.nc.SetReadDeadline(time.Now().Add(DEFAULT_LEAFNODE_INFO_WAIT))
 	resp, err = http.ReadResponse(br, req)
 	if err == nil &&
 		(resp.StatusCode != 101 ||

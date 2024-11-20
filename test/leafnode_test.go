@@ -1,4 +1,4 @@
-// Copyright 2019-2020 The NATS Authors
+// Copyright 2019-2024 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -4376,13 +4376,13 @@ func TestLeafnodeHeaders(t *testing.T) {
 
 	snc, err := nats.Connect(srv.ClientURL())
 	if err != nil {
-		t.Fatalf(err.Error())
+		t.Fatal(err.Error())
 	}
 	defer snc.Close()
 
 	lnc, err := nats.Connect(leaf.ClientURL())
 	if err != nil {
-		t.Fatalf(err.Error())
+		t.Fatal(err.Error())
 	}
 	defer lnc.Close()
 
@@ -4407,7 +4407,7 @@ func TestLeafnodeHeaders(t *testing.T) {
 	}
 	err = snc.PublishMsg(msg)
 	if err != nil {
-		t.Fatalf(err.Error())
+		t.Fatal(err.Error())
 	}
 
 	smsg, err := ssub.NextMsg(time.Second)
@@ -4425,4 +4425,28 @@ func TestLeafnodeHeaders(t *testing.T) {
 	if len(lmsg.Header) == 0 {
 		t.Fatalf("leaf msg header is empty")
 	}
+}
+
+func TestLeafNodeClusterNameWithSpacesRejected(t *testing.T) {
+	s, opts := runLeafServer()
+	defer s.Shutdown()
+
+	lc := createLeafConn(t, opts.LeafNode.Host, opts.LeafNode.Port)
+	defer lc.Close()
+
+	checkInfoMsg(t, lc)
+	sendProto(t, lc, "CONNECT {\"cluster\":\"my cluster\"}\r\n")
+	expect := expectCommand(t, lc)
+	expect(errRe)
+	expectDisconnect(t, lc)
+
+	lc = createLeafConn(t, opts.LeafNode.Host, opts.LeafNode.Port)
+	defer lc.Close()
+	leafSend, leafExpect := setupLeaf(t, lc, 1)
+	// The accept side does expect an INFO from an handshake,
+	// so it will "ignore" the first one.
+	leafSend("INFO {\"server\":\"server\"}\r\n")
+	leafSend("INFO {\"cluster\":\"my cluster\"}\r\n")
+	leafExpect(errRe)
+	expectDisconnect(t, lc)
 }

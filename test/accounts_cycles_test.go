@@ -489,6 +489,60 @@ func TestAccountImportSubjectMapping(t *testing.T) {
 	}
 }
 
+// bug: https://github.com/nats-io/nats-server/issues/1789
+func TestAccountCycleWithRenaming(t *testing.T) {
+	conf := createConfFile(t, []byte(`
+		accounts {
+		  A {
+		    exports [ { service: * } ]
+			imports [ { service { subject: foo, account: B }, to: foo } ]
+		  }
+		  B {
+		    exports [ { service: foo } ]
+			imports [ { service { subject: *, account: A }, to: "$1" } ]
+		  }
+		}
+	`))
+	if _, err := server.ProcessConfigFile(conf); err == nil || !strings.Contains(err.Error(), server.ErrImportFormsCycle.Error()) {
+		t.Fatalf("Expected an error on cycle service import, got none")
+	}
+
+	conf = createConfFile(t, []byte(`
+		accounts {
+		  A {
+		    exports [ { stream: * } ]
+			imports [ { stream { subject: foo, account: B }, to: foo } ]
+		  }
+		  B {
+		    exports [ { stream: foo } ]
+			imports [ { stream { subject: *, account: A }, to: "$1" } ]
+		  }
+		}
+	`))
+	if _, err := server.ProcessConfigFile(conf); err == nil || !strings.Contains(err.Error(), server.ErrImportFormsCycle.Error()) {
+		t.Fatalf("Expected an error on cycle service import, got none")
+	}
+}
+
+// https://github.com/nats-io/nats-server/issues/5752
+func TestAccountCycleFalsePositiveSubjectMapping(t *testing.T) {
+	conf := createConfFile(t, []byte(`
+		accounts {
+		  A {
+		    exports [ { service: "a.*" } ]
+			imports [ { service { subject: "a.*", account: B }, to: "b.*" } ]
+		  }
+		  B {
+		    exports [ { service: "a.*" } ]
+			imports [ { service { subject: "a.foo", account: A }, to: "c.foo" } ]
+		  }
+		}
+	`))
+	if _, err := server.ProcessConfigFile(conf); err != nil {
+		t.Fatalf("Expected no errors on cycle service import, got error")
+	}
+}
+
 func clientConnectToServer(t *testing.T, s *server.Server) *nats.Conn {
 	t.Helper()
 	nc, err := nats.Connect(s.ClientURL(),

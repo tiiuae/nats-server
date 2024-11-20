@@ -11,40 +11,40 @@ changelog:
   skip: true
 
 builds:
-  - main: .
-    binary: nats-server
-    flags:
-      - -trimpath
-    ldflags:
-      - -w -X github.com/tiiuae/nats-server/v2/server.gitCommit={{.ShortCommit}}
-    env:
-      - GO111MODULE=on
-      - CGO_ENABLED=0
-    goos:
-      - darwin
-      - linux
-      - windows
-      - freebsd
-    goarch:
-      - amd64
-      - arm
-      - arm64
-      - 386
-      - mips64le
-      - s390x
-      - ppc64le
-    goarm:
-      - 6
-      - 7
-    ignore:
-      - goos: darwin
-        goarch: 386
-      - goos: freebsd
-        goarch: arm
-      - goos: freebsd
-        goarch: arm64
-      - goos: freebsd
-        goarch: 386
+- main: .
+  binary: nats-server
+  flags:
+  - -trimpath
+  ldflags:
+    - -w -X 'github.com/tiiuae/nats-server/v2/server.gitCommit={{.ShortCommit}}' -X 'github.com/tiiuae/nats-server/v2/server.serverVersion={{.Tag}}'
+  env:
+    - GO111MODULE=on
+    - CGO_ENABLED=0
+  goos:
+  - darwin
+  - linux
+  - windows
+  - freebsd
+  goarch:
+  - amd64
+  - arm
+  - arm64
+  - 386
+  - mips64le
+  - s390x
+  - ppc64le
+  goarm:
+  - 6
+  - 7
+  ignore:
+    - goos: darwin
+      goarch: 386
+    - goos: freebsd
+      goarch: arm
+    - goos: freebsd
+      goarch: arm64
+    - goos: freebsd
+      goarch: 386
 
 nfpms:
   - file_name_template: "{{.ProjectName}}-{{.Tag}}-{{.Arch}}{{if .Arm}}{{.Arm}}{{end}}"

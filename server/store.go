@@ -104,6 +104,7 @@ type StreamStore interface {
 	SubjectsTotals(filterSubject string) map[string]uint64
 	MultiLastSeqs(filters []string, maxSeq uint64, maxAllowed int) ([]uint64, error)
 	NumPending(sseq uint64, filter string, lastPerSubject bool) (total, validThrough uint64)
+	NumPendingMulti(sseq uint64, sl *Sublist, lastPerSubject bool) (total, validThrough uint64)
 	State() StreamState
 	FastState(*StreamState)
 	EncodedStreamState(failed uint64) (enc []byte, err error)
@@ -294,12 +295,16 @@ type DeleteRange struct {
 }
 
 func (dr *DeleteRange) State() (first, last, num uint64) {
-	return dr.First, dr.First + dr.Num, dr.Num
+	deletesAfterFirst := dr.Num
+	if deletesAfterFirst > 0 {
+		deletesAfterFirst--
+	}
+	return dr.First, dr.First + deletesAfterFirst, dr.Num
 }
 
 // Range will range over all the deleted sequences represented by this block.
 func (dr *DeleteRange) Range(f func(uint64) bool) {
-	for seq := dr.First; seq <= dr.First+dr.Num; seq++ {
+	for seq := dr.First; seq < dr.First+dr.Num; seq++ {
 		if !f(seq) {
 			return
 		}
@@ -724,7 +729,7 @@ func isOutOfSpaceErr(err error) bool {
 var errFirstSequenceMismatch = errors.New("first sequence mismatch")
 
 func isClusterResetErr(err error) bool {
-	return err == errLastSeqMismatch || err == ErrStoreEOF || err == errFirstSequenceMismatch
+	return err == errLastSeqMismatch || err == ErrStoreEOF || err == errFirstSequenceMismatch || errors.Is(err, errCatchupAbortedNoLeader) || err == errCatchupTooManyRetries
 }
 
 // Copy all fields.
@@ -767,4 +772,12 @@ func stringToBytes(s string) []byte {
 	p := unsafe.StringData(s)
 	b := unsafe.Slice(p, len(s))
 	return b
+}
+
+// Forces a copy of a string, for use in the case that you might have been passed a value when bytesToString was used,
+// but now you need a separate copy of it to store for longer-term use.
+func copyString(s string) string {
+	b := make([]byte, len(s))
+	copy(b, s)
+	return bytesToString(b)
 }

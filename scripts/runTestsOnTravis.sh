@@ -7,10 +7,10 @@ if [ "$1" = "compile" ]; then
     go build;
 
     # Now run the linters.
-    go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.56.1;
+    go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.62.0;
     golangci-lint run;
     if [ "$TRAVIS_TAG" != "" ]; then
-        go test -race -v -run=TestVersionMatchesTag ./server -count=1 -vet=off
+        go test -race -v -run=TestVersionMatchesTag ./server -ldflags="-X=github.com/nats-io/nats-server/v2/server.serverVersion=$TRAVIS_TAG" -count=1 -vet=off
     fi
 
 elif [ "$1" = "build_only" ]; then
@@ -38,7 +38,7 @@ elif [ "$1" = "js_tests" ]; then
     # with `TestJetStream`. We exclude the clustered and super-clustered
     # tests by using the appropriate tags.
 
-    go test -race -v -run=TestJetStream ./server -tags=skip_js_cluster_tests,skip_js_cluster_tests_2,skip_js_cluster_tests_3,skip_js_super_cluster_tests -count=1 -vet=off -timeout=30m -failfast
+    go test -race -v -run=TestJetStream ./server -tags=skip_js_cluster_tests,skip_js_cluster_tests_2,skip_js_cluster_tests_3,skip_js_cluster_tests_4,skip_js_super_cluster_tests -count=1 -vet=off -timeout=30m -failfast
 
 elif [ "$1" = "js_cluster_tests_1" ]; then
 
@@ -46,7 +46,7 @@ elif [ "$1" = "js_cluster_tests_1" ]; then
     # start with `TestJetStreamCluster`. Will run the first batch of tests,
     # excluding others with use of proper tags.
 
-    go test -race -v -run=TestJetStreamCluster ./server -tags=skip_js_cluster_tests_2,skip_js_cluster_tests_3 -count=1 -vet=off -timeout=30m -failfast
+    go test -race -v -run=TestJetStreamCluster ./server -tags=skip_js_cluster_tests_2,skip_js_cluster_tests_3,skip_js_cluster_tests_4 -count=1 -vet=off -timeout=30m -failfast
 
 elif [ "$1" = "js_cluster_tests_2" ]; then
 
@@ -54,7 +54,7 @@ elif [ "$1" = "js_cluster_tests_2" ]; then
     # start with `TestJetStreamCluster`. Will run the second batch of tests,
     # excluding others with use of proper tags.
 
-    go test -race -v -run=TestJetStreamCluster ./server -tags=skip_js_cluster_tests,skip_js_cluster_tests_3 -count=1 -vet=off -timeout=30m -failfast
+    go test -race -v -run=TestJetStreamCluster ./server -tags=skip_js_cluster_tests,skip_js_cluster_tests_3,skip_js_cluster_tests_4 -count=1 -vet=off -timeout=30m -failfast
 
 elif [ "$1" = "js_cluster_tests_3" ]; then
 
@@ -63,7 +63,16 @@ elif [ "$1" = "js_cluster_tests_3" ]; then
     # excluding others with use of proper tags.
     #
 
-    go test -race -v -run=TestJetStreamCluster ./server -tags=skip_js_cluster_tests,skip_js_cluster_tests_2 -count=1 -vet=off -timeout=30m -failfast
+    go test -race -v -run=TestJetStreamCluster ./server -tags=skip_js_cluster_tests,skip_js_cluster_tests_2,skip_js_cluster_tests_4 -count=1 -vet=off -timeout=30m -failfast
+
+elif [ "$1" = "js_cluster_tests_4" ]; then
+
+    # Run JetStream clustered tests. By convention, all JS cluster tests
+    # start with `TestJetStreamCluster`. Will run the third batch of tests,
+    # excluding others with use of proper tags.
+    #
+
+    go test -race -v -run=TestJetStreamCluster ./server -tags=skip_js_cluster_tests,skip_js_cluster_tests_2,skip_js_cluster_tests_3 -count=1 -vet=off -timeout=30m -failfast
 
 elif [ "$1" = "js_super_cluster_tests" ]; then
 
@@ -71,13 +80,6 @@ elif [ "$1" = "js_super_cluster_tests" ]; then
     # tests start with `TestJetStreamSuperCluster`.
 
     go test -race -v -run=TestJetStreamSuperCluster ./server -count=1 -vet=off -timeout=30m -failfast
-
-elif [ "$1" = "js_chaos_tests" ]; then
-
-    # Run JetStream chaos tests. By convention, all JS cluster chaos tests
-    # start with `TestJetStreamChaos`.
-
-    go test -race -v -p=1 -run=TestJetStreamChaos ./server -tags=js_chaos_tests -count=1 -vet=off -timeout=30m -failfast
 
 elif [ "$1" = "mqtt_tests" ]; then
 
@@ -98,7 +100,8 @@ elif [ "$1" = "srv_pkg_non_js_tests" ]; then
     # by using `skip_js_tests`, MQTT tests by using `skip_mqtt_tests` and
     # message tracing tests by using `skip_msgtrace_tests`.
 
-    go test -race -v -p=1 ./server/... -tags=skip_store_tests,skip_js_tests,skip_mqtt_tests,skip_msgtrace_tests -count=1 -vet=off -timeout=30m -failfast
+    # Also including the ldflag with the version since this includes the `TestVersionMatchesTag`.
+    go test -race -v -p=1 ./server/... -ldflags="-X=github.com/nats-io/nats-server/v2/server.serverVersion=$TRAVIS_TAG" -tags=skip_store_tests,skip_js_tests,skip_mqtt_tests,skip_msgtrace_tests -count=1 -vet=off -timeout=30m -failfast
 
 elif [ "$1" = "non_srv_pkg_tests" ]; then
 
