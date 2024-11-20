@@ -721,7 +721,7 @@ func (s *Server) startLeafNodeAcceptLoop() {
 		s.leafNodeQUICListenerErr = qe
 		if qe != nil {
 			s.mu.Unlock()
-			s.Fatalf("Error listening on leafnode port: %d - %v", opts.LeafNode.Port, e)
+			s.Fatalf("Error listening on leafnode port: %d - %v", opts.LeafNode.Port, qe)
 			return
 		}
 
