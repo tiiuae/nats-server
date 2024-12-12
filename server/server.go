@@ -2603,6 +2603,13 @@ func (s *Server) Shutdown() {
 		s.leafNodeListener = nil
 	}
 
+	// Kick QUIC client AcceptLoop()
+	if s.quic.listener != nil {
+		doneExpected++
+		s.quic.listener.Close()
+		s.quic.listener = nil
+	}
+
 	// Kick QUIC leafnodes AcceptLoop()
 	if s.leafNodeQUICListener != nil {
 		doneExpected++

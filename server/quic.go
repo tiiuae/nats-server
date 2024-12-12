@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -25,18 +26,24 @@ var defaultQUICConfig = &quic.Config{
 type quicConnStream struct {
 	quic.Connection
 	quic.Stream
+	listener *quicListener
 }
 
 func (c *quicConnStream) Close() error {
-	return errors.Join(
+	errs := []error{
 		c.Stream.Close(),
 		c.Connection.CloseWithError(0, "connection closed"),
-	)
+	}
+	if c.listener != nil && c.listener.refCount.Add(-1) <= 0 {
+		errs = append(errs, c.listener.transport.Close(), c.listener.transport.Conn.Close())
+	}
+	return errors.Join(errs...)
 }
 
 type quicListener struct {
 	listener  *quic.Listener
 	transport *quic.Transport
+	refCount  atomic.Int32
 }
 
 func (l *quicListener) Addr() net.Addr {
@@ -58,14 +65,20 @@ func (l *quicListener) Accept() (net.Conn, error) {
 		_ = conn.CloseWithError(0, "failed to accept stream")
 		return nil, fmt.Errorf("conn.OpenStreamSync: %w", err)
 	}
+	l.refCount.Add(1)
 	return &quicConnStream{
+		listener:   l,
 		Connection: conn,
 		Stream:     stream,
 	}, nil
 }
 
 func (l *quicListener) Close() error {
-	return l.transport.Close()
+	errs := []error{l.listener.Close()}
+	if refCount := l.refCount.Add(-1); refCount <= 0 {
+		errs = append(errs, l.transport.Close(), l.transport.Conn.Close())
+	}
+	return errors.Join(errs...)
 }
 
 type srvQUIC struct {
@@ -158,6 +171,7 @@ func (s *Server) quicListen(hp string, tlsConfig *tls.Config, o *QUICOpts) (ql *
 		_ = conn.Close()
 		return nil, err
 	}
+	ql.refCount.Add(1)
 	return ql, nil
 }
 
