@@ -649,6 +649,7 @@ type QUICOpts struct {
 
 	QUICConfig           *quic.Config
 	HandshakeIdleTimeout time.Duration
+	MaxIdleTimeout       time.Duration
 
 	tlsConfigOpts *TLSConfigOpts
 }
@@ -5282,6 +5283,24 @@ func parseQUIC(v interface{}, o *Options, errors *[]error, warnings *[]error) er
 				*errors = append(*errors, err)
 			}
 			o.QUIC.HandshakeIdleTimeout = ht
+		case "max_idle_timeout":
+			it := time.Duration(0)
+			switch mv := mv.(type) {
+			case int64:
+				it = time.Duration(mv) * time.Second
+			case string:
+				var err error
+				it, err = time.ParseDuration(mv)
+				if err != nil {
+					err := &configErr{tk, err.Error()}
+					*errors = append(*errors, err)
+					continue
+				}
+			default:
+				err := &configErr{tk, fmt.Sprintf("error parsing max idle timeout: unsupported type %T", mv)}
+				*errors = append(*errors, err)
+			}
+			o.QUIC.MaxIdleTimeout = it
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
@@ -5298,6 +5317,7 @@ func parseQUIC(v interface{}, o *Options, errors *[]error, warnings *[]error) er
 	o.QUIC.QUICConfig = defaultQUICConfig.Clone()
 	o.QUIC.QUICConfig.HandshakeIdleTimeout = o.QUIC.HandshakeIdleTimeout
 	o.QUIC.QUICConfig.KeepAlivePeriod = 10 * time.Second
+	o.QUIC.QUICConfig.MaxIdleTimeout = o.QUIC.MaxIdleTimeout
 	return nil
 }
 
