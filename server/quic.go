@@ -35,11 +35,12 @@ func (c *quicConnStream) Close() error {
 }
 
 type quicListener struct {
-	*quic.Listener
+	listener  *quic.Listener
+	transport *quic.Transport
 }
 
 func (l *quicListener) Addr() net.Addr {
-	a := l.Listener.Addr().(*net.UDPAddr)
+	a := l.listener.Addr().(*net.UDPAddr)
 	return &net.TCPAddr{
 		IP:   a.IP,
 		Port: a.Port,
@@ -48,7 +49,7 @@ func (l *quicListener) Addr() net.Addr {
 }
 
 func (l *quicListener) Accept() (net.Conn, error) {
-	conn, err := l.Listener.Accept(context.Background())
+	conn, err := l.listener.Accept(context.Background())
 	if err != nil {
 		return nil, err
 	}
@@ -61,6 +62,10 @@ func (l *quicListener) Accept() (net.Conn, error) {
 		Connection: conn,
 		Stream:     stream,
 	}, nil
+}
+
+func (l *quicListener) Close() error {
+	return l.transport.Close()
 }
 
 type srvQUIC struct {
@@ -91,7 +96,7 @@ func (s *Server) startQUICServer() {
 	// avoid the possibility of it being "intercepted".
 
 	s.mu.Lock()
-	ql, err := s.quicListen(hp, o.TLSConfig.Clone(), o)
+	ql, err := s.quicListen(hp, o.TLSConfig, o)
 	s.quic.listenerErr = err
 	if err != nil {
 		s.mu.Unlock()
@@ -130,16 +135,27 @@ func (s *Server) quicListen(hp string, tlsConfig *tls.Config, o *QUICOpts) (ql *
 	if tlsConfig == nil {
 		return nil, errors.New("QUIC connections require TLS configuration")
 	}
-	ql = &quicListener{}
+	tlsConfig = tlsConfig.Clone()
 	tlsConfig.GetConfigForClient = s.quicGetTLSConfig
+
+	addr, err := net.ResolveUDPAddr("udp", hp)
+	if err != nil {
+		return nil, fmt.Errorf("net.ResolveUDPAddr: %w", err)
+	}
+	conn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("net.ListenUDP: %w", err)
+	}
+	ql = &quicListener{transport: &quic.Transport{Conn: conn}}
 	if o.QUICConfig == nil {
-		ql.Listener, err = quic.ListenAddr(hp, tlsConfig, &quic.Config{
+		ql.listener, err = ql.transport.Listen(tlsConfig, &quic.Config{
 			HandshakeIdleTimeout: o.HandshakeIdleTimeout,
 		})
 	} else {
-		ql.Listener, err = quic.ListenAddr(hp, tlsConfig, o.QUICConfig.Clone())
+		ql.listener, err = ql.transport.Listen(tlsConfig, o.QUICConfig.Clone())
 	}
 	if err != nil {
+		_ = conn.Close()
 		return nil, err
 	}
 	return ql, nil
