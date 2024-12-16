@@ -218,7 +218,7 @@ type Server struct {
 	routeTLSName            string
 	leafNodeListener        net.Listener
 	leafNodeListenerErr     error
-	leafNodeQUICListener    net.Listener
+	leafNodeQUICListener    *quicListener
 	leafNodeQUICListenerErr error
 	leafNodeInfo            Info
 	leafNodeInfoJSON        []byte
@@ -2607,14 +2607,12 @@ func (s *Server) Shutdown() {
 	if s.quic.listener != nil {
 		doneExpected++
 		s.quic.listener.Close()
-		s.quic.listener = nil
 	}
 
 	// Kick QUIC leafnodes AcceptLoop()
 	if s.leafNodeQUICListener != nil {
 		doneExpected++
 		s.leafNodeQUICListener.Close()
-		s.leafNodeQUICListener = nil
 	}
 
 	// Kick route AcceptLoop()
@@ -2663,6 +2661,12 @@ func (s *Server) Shutdown() {
 
 	// Wait for go routines to be done.
 	s.grWG.Wait()
+
+	s.quic.listener.CloseTransportAndConn()
+	s.quic.listener = nil
+
+	s.leafNodeQUICListener.CloseTransportAndConn()
+	s.leafNodeQUICListener = nil
 
 	if opts.PortsFileDir != _EMPTY_ {
 		s.deletePortsFile(opts.PortsFileDir)
