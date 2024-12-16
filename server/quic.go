@@ -322,6 +322,21 @@ func makeLeafQUICConfig(opts *QUICOpts, timeout time.Duration) (c *quic.Config) 
 	return c
 }
 
+func makeLeafQUICTLSConfig(remote *leafNodeCfg) *tls.Config {
+	_, tlsConfig, tlsName, _ := leafNodeGetTLSConfigForSolicit(remote)
+	if tlsConfig.ServerName == _EMPTY_ {
+		// If the given url is a hostname, use this hostname for the
+		// ServerName. If it is an IP, use the cfg's tlsName. If none
+		// is available, resort to current IP.
+		host := remote.getCurrentURL().Hostname()
+		if tlsName != _EMPTY_ && net.ParseIP(host) != nil {
+			host = tlsName
+		}
+		tlsConfig.ServerName = host
+	}
+	return tlsConfig
+}
+
 func (d *quicDialer) Dial(network, addr string) (net.Conn, error) {
 	conn, err := quic.DialAddr(context.Background(), addr, d.tlsConfig, d.quicConfig)
 	if err != nil {

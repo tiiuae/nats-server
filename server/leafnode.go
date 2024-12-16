@@ -541,7 +541,7 @@ func (s *Server) connectToRemoteLeafNode(remote *leafNodeCfg, firstConnect bool)
 				if isQUICURL(rURL) {
 					s.Debugf("Trying to connect as leafnode to remote server on %q%s using QUIC", rURL.Host, ipStr)
 					conn, err = (&quicDialer{
-						tlsConfig:  remote.TLSConfig,
+						tlsConfig:  makeLeafQUICTLSConfig(remote),
 						quicConfig: makeLeafQUICConfig(&opts.QUIC, dialTimeout),
 					}).Dial("udp", url)
 				} else {
@@ -1242,7 +1242,7 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 // Lock held on entry.
 func (c *client) leafClientHandshakeIfNeeded(remote *leafNodeCfg, opts *Options) (bool, error) {
 	// Check if TLS is required and gather TLS config variables.
-	tlsRequired, tlsConfig, tlsName, tlsTimeout := c.leafNodeGetTLSConfigForSolicit(remote)
+	tlsRequired, tlsConfig, tlsName, tlsTimeout := leafNodeGetTLSConfigForSolicit(remote)
 	if !tlsRequired {
 		return false, nil
 	}
@@ -2912,7 +2912,7 @@ func (c *client) setLeafConnectDelayIfSoliciting(delay time.Duration) (string, t
 // if TLS is required, and if so, will return a clone of the TLS Config
 // (since some fields will be changed during handshake), the TLS server
 // name that is remembered, and the TLS timeout.
-func (c *client) leafNodeGetTLSConfigForSolicit(remote *leafNodeCfg) (bool, *tls.Config, string, float64) {
+func leafNodeGetTLSConfigForSolicit(remote *leafNodeCfg) (bool, *tls.Config, string, float64) {
 	var (
 		tlsConfig  *tls.Config
 		tlsName    string
