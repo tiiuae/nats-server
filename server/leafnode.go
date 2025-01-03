@@ -1186,7 +1186,7 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 
 		// If the user wants the TLS handshake to occur first, now that it is
 		// done, send the INFO protocol.
-		if quic || tlsFirst {
+		if tlsFirst {
 			c.flags.set(didTLSFirst)
 			c.sendProtoNow(proto)
 			if c.isClosed() {
