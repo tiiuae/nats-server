@@ -310,7 +310,10 @@ func validateLeafNode(o *Options) error {
 	if o.SystemAccount == _EMPTY_ {
 		return fmt.Errorf("leaf nodes and gateways (both being defined) require a system account to also be configured")
 	}
-	if err := validatePinnedCerts(o.LeafNode.TLSPinnedCerts); err != nil {
+	if err := validateCertSet("pinned_certs", CertSet(o.LeafNode.TLSPinnedCerts)); err != nil {
+		return fmt.Errorf("leafnode: %v", err)
+	}
+	if err := validateCertSet("revoked_certs", CertSet(o.LeafNode.TLSRevokedCerts)); err != nil {
 		return fmt.Errorf("leafnode: %v", err)
 	}
 	return nil

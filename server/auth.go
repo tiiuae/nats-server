@@ -1468,7 +1468,10 @@ func comparePasswords(serverPassword, clientPassword string) bool {
 }
 
 func validateAuth(o *Options) error {
-	if err := validatePinnedCerts(o.TLSPinnedCerts); err != nil {
+	if err := validateCertSet("pinned_certs", CertSet(o.TLSPinnedCerts)); err != nil {
+		return err
+	}
+	if err := validateCertSet("revoked_certs", CertSet(o.TLSRevokedCerts)); err != nil {
 		return err
 	}
 	for _, u := range o.Users {
