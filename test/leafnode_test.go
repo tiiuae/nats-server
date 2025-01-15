@@ -1331,9 +1331,6 @@ func TestLeafNodeTLSMixIP(t *testing.T) {
 }
 
 func TestLeafNodeTLSNonRevokedCertIsAccepted(t *testing.T) {
-	/* NOTE! Cert hash obtained with:
-	   openssl x509 -noout -pubkey -in client-cert.pem | openssl pkey -pubin -outform DER | openssl dgst -sha256
-	*/
 	serverConfigContent := `
 	listen: "127.0.0.1:-1"
 	leafnodes {
@@ -1343,7 +1340,7 @@ func TestLeafNodeTLSNonRevokedCertIsAccepted(t *testing.T) {
 			key_file:  "./configs/certs/server-key.pem"
 			ca_file:   "./configs/certs/ca.pem"
 			verify: true
-			revoked_certs: ["acceb7edaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+			revoked_certs: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
 		}
 	}
 	`
@@ -1406,6 +1403,9 @@ func (l *captureDebugLogger) waitFor(expect string, timeout time.Duration) bool 
 }
 
 func TestLeafNodeTLSRevokedCertIsRejected(t *testing.T) {
+	/* NOTE! Cert hash obtained with:
+	   openssl x509 -noout -pubkey -in client-cert.pem | openssl pkey -pubin -outform DER | openssl dgst -sha256
+	*/
 	serverConfigContent := `
 	listen: "127.0.0.1:-1"
 	leafnodes {
@@ -1455,8 +1455,8 @@ func TestLeafNodeTLSRevokedCertIsRejected(t *testing.T) {
 }
 
 func TestLeafNodeTLSRevokedCertConfigReloadIsRejected(t *testing.T) {
-	rejectedCertHash := "bf6f821f09fde09451411ba3b42c0f74727d61a974c69fd3cf5257f39c75f0e9"
-	acceptedCertHash := "acceb7edaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	matchingCertHash := "bf6f821f09fde09451411ba3b42c0f74727d61a974c69fd3cf5257f39c75f0e9"
+	nonMatchingCertHash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	serverConfigContent := `
 	listen: "127.0.0.1:-1"
 	leafnodes {
@@ -1470,7 +1470,7 @@ func TestLeafNodeTLSRevokedCertConfigReloadIsRejected(t *testing.T) {
 		}
 	}
 	`
-	serverConfig := createConfFile(t, []byte(fmt.Sprintf(serverConfigContent, rejectedCertHash)))
+	serverConfig := createConfFile(t, []byte(fmt.Sprintf(serverConfigContent, matchingCertHash)))
 
 	leafServer, leafServerOpts := RunServerWithConfig(serverConfig)
 	defer leafServer.Shutdown()
@@ -1499,7 +1499,7 @@ func TestLeafNodeTLSRevokedCertConfigReloadIsRejected(t *testing.T) {
 
 	checkLeafNodeConnections(t, leafServer, 0)
 
-	os.WriteFile(serverConfig, []byte(fmt.Sprintf(serverConfigContent, acceptedCertHash)), 0660)
+	os.WriteFile(serverConfig, []byte(fmt.Sprintf(serverConfigContent, nonMatchingCertHash)), 0660)
 	serverReloadErr := leafServer.Reload()
 	if serverReloadErr == nil || !strings.Contains(serverReloadErr.Error(), "config reload not supported for LeafNode") {
 		t.Fatalf("expected 'config reload not supported for LeafNode' error, got %v", serverReloadErr)
