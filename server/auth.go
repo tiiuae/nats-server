@@ -425,7 +425,7 @@ func (c *client) matchesRevokedCert(tlsRevokedCerts RevokedCertSet) bool {
 	tlsState := c.GetTLSConnectionState()
 	if tlsState == nil || len(tlsState.PeerCertificates) == 0 || tlsState.PeerCertificates[0] == nil {
 		c.Debugf("Failed revoked cert test as client did not provide a certificate")
-		return false
+		return true
 	}
 	sha := sha256.Sum256(tlsState.PeerCertificates[0].RawSubjectPublicKeyInfo)
 	keyId := hex.EncodeToString(sha[:])
