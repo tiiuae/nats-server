@@ -417,6 +417,25 @@ func (c *client) matchesPinnedCert(tlsPinnedCerts PinnedCertSet) bool {
 	return true
 }
 
+// returns true if the client needs to be disconnected
+func (c *client) matchesRevokedCert(tlsRevokedCerts RevokedCertSet) bool {
+	if tlsRevokedCerts == nil {
+		return false
+	}
+	tlsState := c.GetTLSConnectionState()
+	if tlsState == nil || len(tlsState.PeerCertificates) == 0 || tlsState.PeerCertificates[0] == nil {
+		c.Debugf("Failed revoked cert test as client did not provide a certificate")
+		return true
+	}
+	sha := sha256.Sum256(tlsState.PeerCertificates[0].RawSubjectPublicKeyInfo)
+	keyId := hex.EncodeToString(sha[:])
+	if _, ok := tlsRevokedCerts[keyId]; ok {
+		c.Debugf("Failed revoked cert test for key id: %s", keyId)
+		return true
+	}
+	return false
+}
+
 func processUserPermissionsTemplate(lim jwt.UserPermissionLimits, ujwt *jwt.UserClaims, acc *Account) (jwt.UserPermissionLimits, error) {
 	nArrayCartesianProduct := func(a ...[]string) [][]string {
 		c := 1
@@ -1449,7 +1468,10 @@ func comparePasswords(serverPassword, clientPassword string) bool {
 }
 
 func validateAuth(o *Options) error {
-	if err := validatePinnedCerts(o.TLSPinnedCerts); err != nil {
+	if err := validateCertSet("pinned_certs", CertSet(o.TLSPinnedCerts)); err != nil {
+		return err
+	}
+	if err := validateCertSet("revoked_certs", CertSet(o.TLSRevokedCerts)); err != nil {
 		return err
 	}
 	for _, u := range o.Users {

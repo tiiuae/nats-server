@@ -1899,7 +1899,7 @@ func (s *Server) createRoute(conn net.Conn, rURL *url.URL, accName string) *clie
 			tlsConfig = tlsConfig.Clone()
 		}
 		// Perform (server or client side) TLS handshake.
-		if resetTLSName, err := c.doTLSHandshake("route", didSolicit, rURL, tlsConfig, tlsName, opts.Cluster.TLSTimeout, opts.Cluster.TLSPinnedCerts); err != nil {
+		if resetTLSName, err := c.doTLSHandshake("route", didSolicit, rURL, tlsConfig, tlsName, opts.Cluster.TLSTimeout, opts.Cluster.TLSPinnedCerts, opts.Cluster.TLSRevokedCerts); err != nil {
 			c.mu.Unlock()
 			if resetTLSName {
 				s.mu.Lock()

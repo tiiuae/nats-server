@@ -596,7 +596,7 @@ func (s *Server) createMQTTClient(conn net.Conn, ws *websocket) *client {
 		}
 
 		// Perform server-side TLS handshake.
-		if err := c.doTLSServerHandshake(tlsHandshakeMQTT, opts.MQTT.TLSConfig, opts.MQTT.TLSTimeout, opts.MQTT.TLSPinnedCerts); err != nil {
+		if err := c.doTLSServerHandshake(tlsHandshakeMQTT, opts.MQTT.TLSConfig, opts.MQTT.TLSTimeout, opts.MQTT.TLSPinnedCerts, opts.MQTT.TLSRevokedCerts); err != nil {
 			c.mu.Unlock()
 			return nil
 		}
@@ -678,7 +678,10 @@ func validateMQTTOptions(o *Options) error {
 		o.LeafNode.Port == 0 && len(o.LeafNode.Remotes) == 0 {
 		return errMQTTStandaloneNeedsJetStream
 	}
-	if err := validatePinnedCerts(mo.TLSPinnedCerts); err != nil {
+	if err := validateCertSet("pinned_certs", CertSet(mo.TLSPinnedCerts)); err != nil {
+		return fmt.Errorf("mqtt: %v", err)
+	}
+	if err := validateCertSet("revoked_certs", CertSet(mo.TLSRevokedCerts)); err != nil {
 		return fmt.Errorf("mqtt: %v", err)
 	}
 	if mo.ConsumerReplicas > 0 && mo.StreamReplicas > 0 && mo.ConsumerReplicas > mo.StreamReplicas {
