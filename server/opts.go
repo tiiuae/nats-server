@@ -152,23 +152,23 @@ type RemoteGatewayOpts struct {
 
 // LeafNodeOpts are options for a given server to accept leaf node connections and/or connect to a remote cluster.
 type LeafNodeOpts struct {
-	Host              string        `json:"addr,omitempty"`
-	Port              int           `json:"port,omitempty"`
-	Username          string        `json:"-"`
-	Password          string        `json:"-"`
-	Nkey              string        `json:"-"`
-	Account           string        `json:"-"`
-	Users             []*User       `json:"-"`
-	AuthTimeout       float64       `json:"auth_timeout,omitempty"`
-	TLSConfig         *tls.Config   `json:"-"`
-	TLSTimeout        float64       `json:"tls_timeout,omitempty"`
-	TLSMap            bool          `json:"-"`
-	TLSPinnedCerts    PinnedCertSet `json:"-"`
+	Host              string         `json:"addr,omitempty"`
+	Port              int            `json:"port,omitempty"`
+	Username          string         `json:"-"`
+	Password          string         `json:"-"`
+	Nkey              string         `json:"-"`
+	Account           string         `json:"-"`
+	Users             []*User        `json:"-"`
+	AuthTimeout       float64        `json:"auth_timeout,omitempty"`
+	TLSConfig         *tls.Config    `json:"-"`
+	TLSTimeout        float64        `json:"tls_timeout,omitempty"`
+	TLSMap            bool           `json:"-"`
+	TLSPinnedCerts    PinnedCertSet  `json:"-"`
 	TLSRevokedCerts   RevokedCertSet `json:"-"`
-	TLSHandshakeFirst bool          `json:"-"`
-	Advertise         string        `json:"-"`
-	NoAdvertise       bool          `json:"-"`
-	ReconnectInterval time.Duration `json:"-"`
+	TLSHandshakeFirst bool           `json:"-"`
+	Advertise         string         `json:"-"`
+	NoAdvertise       bool           `json:"-"`
+	ReconnectInterval time.Duration  `json:"-"`
 
 	// Compression options
 	Compression CompressionOpts `json:"-"`

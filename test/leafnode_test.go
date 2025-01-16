@@ -1452,6 +1452,8 @@ func TestLeafNodeTLSRevokedCertIsRejected(t *testing.T) {
 	if !leafServerLogger.waitFor("Failed revoked cert test", time.Second) {
 		t.Fatalf("did not log 'Failed revoked cert test' debug message")
 	}
+
+	checkLeafNodeConnections(t, leafServer, 0)
 }
 
 func TestLeafNodeTLSRevokedCertConfigReloadIsRejected(t *testing.T) {
