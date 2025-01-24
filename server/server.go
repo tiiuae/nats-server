@@ -2662,11 +2662,15 @@ func (s *Server) Shutdown() {
 	// Wait for go routines to be done.
 	s.grWG.Wait()
 
-	s.quic.listener.CloseTransportAndConn()
-	s.quic.listener = nil
+	if s.quic.listener != nil {
+		s.quic.listener.CloseTransportAndConn()
+		s.quic.listener = nil
+	}
 
-	s.leafNodeQUICListener.CloseTransportAndConn()
-	s.leafNodeQUICListener = nil
+	if s.leafNodeQUICListener != nil {
+		s.leafNodeQUICListener.CloseTransportAndConn()
+		s.leafNodeQUICListener = nil
+	}
 
 	if opts.PortsFileDir != _EMPTY_ {
 		s.deletePortsFile(opts.PortsFileDir)
