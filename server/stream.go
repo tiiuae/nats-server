@@ -106,6 +106,9 @@ type StreamConfig struct {
 
 	// Metadata is additional metadata for the Stream.
 	Metadata map[string]string `json:"metadata,omitempty"`
+
+	// IsClusteredSource indicates that this stream is a source for a clustered stream.
+	IsClusteredSource bool `json:"is_clustered_source"`
 }
 
 // clone performs a deep copy of the StreamConfig struct, returning a new clone with
@@ -364,6 +367,8 @@ type stream struct {
 	lastBySub *subscription
 
 	monitorWg sync.WaitGroup // Wait group for the monitor routine.
+
+	isClusteredSource bool
 }
 
 type sourceInfo struct {
@@ -657,11 +662,12 @@ func (a *Account) addStreamWithAssignment(config *StreamConfig, fsConfig *FileSt
 			ipqLimitByLen[*inMsg](mlen),
 			ipqLimitBySize[*inMsg](msz),
 		),
-		gets: newIPQueue[*directGetReq](s, qpfx+"direct gets"),
-		qch:  make(chan struct{}),
-		mqch: make(chan struct{}),
-		uch:  make(chan struct{}, 4),
-		sch:  make(chan struct{}, 1),
+		gets:              newIPQueue[*directGetReq](s, qpfx+"direct gets"),
+		qch:               make(chan struct{}),
+		mqch:              make(chan struct{}),
+		uch:               make(chan struct{}, 4),
+		sch:               make(chan struct{}, 1),
+		isClusteredSource: config.IsClusteredSource,
 	}
 
 	// Start our signaling routine to process consumers.
@@ -4814,6 +4820,26 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 				outq.sendMsg(reply, b)
 			}
 			return errMsgTTLDisabled
+		}
+
+		// Do real check only if not clustered or traceOnly flag is set.
+		if (!isClustered || traceOnly) && mset.isClusteredSource {
+
+			ss := getHeader(JSStreamSource, hdr)
+			if len(ss) != 0 {
+				_, _, sseq := streamAndSeq(string(ss))
+				if mset.lseq >= sseq {
+					mset.mu.Unlock()
+					bumpCLFS()
+					if canRespond {
+						response := append(pubAck, strconv.FormatUint(sseq, 10)...)
+						response = append(response, ",\"duplicate\": true}"...)
+						outq.sendMsg(reply, response)
+					}
+					return nil
+				}
+
+			}
 		}
 
 		// Dedupe detection. This is done at the cluster level for dedupe detectiom above the
