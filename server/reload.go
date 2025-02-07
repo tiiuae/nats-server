@@ -1680,6 +1680,7 @@ func copyRemoteLNConfigForReloadCompare(current []*RemoteLeafOpts) []*RemoteLeaf
 		// For now, remove DenyImports/Exports since those get modified at runtime
 		// to add JS APIs.
 		cp.DenyImports, cp.DenyExports = nil, nil
+		cp.AllowImports, cp.AllowExports = nil, nil
 		// Remove compression mode
 		cp.Compression = CompressionOpts{}
 		rlns = append(rlns, &cp)

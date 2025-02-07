@@ -204,6 +204,8 @@ type RemoteLeafOpts struct {
 	Hub               bool             `json:"hub,omitempty"`
 	DenyImports       []string         `json:"-"`
 	DenyExports       []string         `json:"-"`
+	AllowImports      []string         `json:"-"`
+	AllowExports      []string         `json:"-"`
 
 	// Compression options for this remote. Each remote could have a different
 	// setting and also be different from the LeafNode options.
@@ -2596,6 +2598,20 @@ func parseRemoteLeafNodes(v any, errors *[]error, warnings *[]error) ([]*RemoteL
 					continue
 				}
 				remote.DenyExports = subjects
+			case "allow_imports", "allow_import":
+				subjects, err := parsePermSubjects(tk, errors)
+				if err != nil {
+					*errors = append(*errors, err)
+					continue
+				}
+				remote.AllowImports = subjects
+			case "allow_exports", "allow_export":
+				subjects, err := parsePermSubjects(tk, errors)
+				if err != nil {
+					*errors = append(*errors, err)
+					continue
+				}
+				remote.AllowExports = subjects
 			case "ws_compress", "ws_compression", "websocket_compress", "websocket_compression":
 				remote.Websocket.Compression = v.(bool)
 			case "ws_no_masking", "websocket_no_masking":
