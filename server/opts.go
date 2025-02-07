@@ -215,6 +215,8 @@ type RemoteLeafOpts struct {
 	Hub               bool             `json:"hub,omitempty"`
 	DenyImports       []string         `json:"-"`
 	DenyExports       []string         `json:"-"`
+	AllowImports      []string         `json:"-"`
+	AllowExports      []string         `json:"-"`
 
 	// FirstInfoTimeout is the amount of time the server will wait for the
 	// initial INFO protocol from the remote server before closing the
@@ -2798,6 +2800,20 @@ func parseRemoteLeafNodes(v any, errors *[]error, warnings *[]error) ([]*RemoteL
 					continue
 				}
 				remote.DenyExports = subjects
+			case "allow_imports", "allow_import":
+				subjects, err := parsePermSubjects(tk, errors)
+				if err != nil {
+					*errors = append(*errors, err)
+					continue
+				}
+				remote.AllowImports = subjects
+			case "allow_exports", "allow_export":
+				subjects, err := parsePermSubjects(tk, errors)
+				if err != nil {
+					*errors = append(*errors, err)
+					continue
+				}
+				remote.AllowExports = subjects
 			case "ws_compress", "ws_compression", "websocket_compress", "websocket_compression":
 				remote.Websocket.Compression = v.(bool)
 			case "ws_no_masking", "websocket_no_masking":

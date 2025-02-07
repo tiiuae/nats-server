@@ -808,6 +808,7 @@ func (c *client) registerWithAccount(acc *Account) error {
 	} else if kind == LEAF {
 		// Check if we are already connected to this cluster.
 		if rc := c.remoteCluster(); rc != _EMPTY_ && acc.hasLeafNodeCluster(rc) {
+			c.Warnf("remoteCluster: %s", rc)
 			return ErrLeafNodeLoop
 		}
 		if acc.MaxTotalLeafNodesReached() {
@@ -1107,11 +1108,18 @@ func (c *client) publicPermissions() *Permissions {
 }
 
 type denyType int
+type allowType int
 
 const (
 	pub = denyType(iota + 1)
 	sub
 	both
+)
+
+const (
+	pubAllow = allowType(iota + 1)
+	subAllow
+	bothAllow
 )
 
 // Merge client.perms structure with additional pub deny permissions
@@ -1157,11 +1165,62 @@ func (c *client) mergeDenyPermissions(what denyType, denyPubs []string) {
 	}
 }
 
+// Merge client.perms structure with additional pub allow permissions
+// Lock is held on entry.
+func (c *client) mergeAllowPermissions(what allowType, allowPubs []string) {
+	if len(allowPubs) == 0 {
+		return
+	}
+	if c.perms == nil {
+		c.perms = &permissions{}
+	}
+	var perms []*perm
+	switch what {
+	case pubAllow:
+		perms = []*perm{&c.perms.pub}
+	case subAllow:
+		perms = []*perm{&c.perms.sub}
+	case bothAllow:
+		perms = []*perm{&c.perms.pub, &c.perms.sub}
+	}
+	for _, p := range perms {
+		if p.allow == nil {
+			p.allow = NewSublistWithCache()
+		}
+	FOR_ALLOW:
+		for _, pubStr := range allowPubs {
+			r := p.allow.Match(pubStr)
+			for _, v := range r.qsubs {
+				for _, s := range v {
+					if string(s.subject) == pubStr {
+						continue FOR_ALLOW
+					}
+				}
+			}
+			for _, s := range r.psubs {
+				if string(s.subject) == pubStr {
+					continue FOR_ALLOW
+				}
+			}
+			sub := &subscription{subject: []byte(pubStr)}
+			_ = p.allow.Insert(sub)
+		}
+	}
+}
+
 // Merge client.perms structure with additional pub deny permissions
 // Client lock must not be held on entry
 func (c *client) mergeDenyPermissionsLocked(what denyType, denyPubs []string) {
 	c.mu.Lock()
 	c.mergeDenyPermissions(what, denyPubs)
+	c.mu.Unlock()
+}
+
+// Merge client.perms structure with additional pub allow permissions
+// Client lock must not be held on entry
+func (c *client) mergeAllowPermissionsLocked(what allowType, allowPubs []string) {
+	c.mu.Lock()
+	c.mergeAllowPermissions(what, allowPubs)
 	c.mu.Unlock()
 }
 

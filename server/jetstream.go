@@ -535,12 +535,21 @@ func (s *Server) canExtendOtherDomain() bool {
 	sysAcc := s.SystemAccount().GetName()
 	for _, r := range opts.LeafNode.Remotes {
 		if r.LocalAccount == sysAcc {
-			for _, denySub := range r.DenyImports {
-				if subjectIsSubsetMatch(denySub, raftAllSubj) {
-					return false
+			allow := false
+			for _, allowSub := range r.AllowImports {
+				if subjectIsSubsetMatch(allowSub, raftAllSubj) {
+					allow = true
+					break
 				}
 			}
-			return true
+			if allow {
+				for _, denySub := range r.DenyImports {
+					if subjectIsSubsetMatch(denySub, raftAllSubj) {
+						return false
+					}
+				}
+			}
+			return allow
 		}
 	}
 	return false
