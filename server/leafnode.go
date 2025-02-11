@@ -310,7 +310,10 @@ func validateLeafNode(o *Options) error {
 	if o.SystemAccount == _EMPTY_ {
 		return fmt.Errorf("leaf nodes and gateways (both being defined) require a system account to also be configured")
 	}
-	if err := validatePinnedCerts(o.LeafNode.TLSPinnedCerts); err != nil {
+	if err := validateCertSet("pinned_certs", CertSet(o.LeafNode.TLSPinnedCerts)); err != nil {
+		return fmt.Errorf("leafnode: %v", err)
+	}
+	if err := validateCertSet("revoked_certs", CertSet(o.LeafNode.TLSRevokedCerts)); err != nil {
 		return fmt.Errorf("leafnode: %v", err)
 	}
 	return nil
@@ -1085,7 +1088,7 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 		// Check to see if we need to spin up TLS.
 		if !c.isWebsocket() && info.TLSRequired {
 			// Perform server-side TLS handshake.
-			if err := c.doTLSServerHandshake(tlsHandshakeLeaf, opts.LeafNode.TLSConfig, opts.LeafNode.TLSTimeout, opts.LeafNode.TLSPinnedCerts); err != nil {
+			if err := c.doTLSServerHandshake(tlsHandshakeLeaf, opts.LeafNode.TLSConfig, opts.LeafNode.TLSTimeout, opts.LeafNode.TLSPinnedCerts, opts.LeafNode.TLSRevokedCerts); err != nil {
 				c.mu.Unlock()
 				return nil
 			}
@@ -1158,7 +1161,7 @@ func (c *client) leafClientHandshakeIfNeeded(remote *leafNodeCfg, opts *Options)
 	rURL := remote.getCurrentURL()
 
 	// Perform the client-side TLS handshake.
-	if resetTLSName, err := c.doTLSClientHandshake(tlsHandshakeLeaf, rURL, tlsConfig, tlsName, tlsTimeout, opts.LeafNode.TLSPinnedCerts); err != nil {
+	if resetTLSName, err := c.doTLSClientHandshake(tlsHandshakeLeaf, rURL, tlsConfig, tlsName, tlsTimeout, opts.LeafNode.TLSPinnedCerts, opts.LeafNode.TLSRevokedCerts); err != nil {
 		// Check if we need to reset the remote's TLS name.
 		if resetTLSName {
 			remote.Lock()
