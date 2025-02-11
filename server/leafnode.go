@@ -1142,6 +1142,86 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 	return c
 }
 
+func containsHost(urls []*url.URL, host string) bool {
+	for _, u := range urls {
+		if u.Host == host {
+			return true
+		}
+	}
+	return false
+}
+
+// GetLeafClientID returns leaf's client ID or -1 if not found.
+func (s *Server) getLeafClientID(leafHost string) (uint64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, v := range s.leafs {
+		v.mu.Lock()
+		if containsHost(v.leaf.remote.URLs, leafHost) {
+			v.mu.Unlock()
+			return v.cid, nil
+		}
+		v.mu.Unlock()
+	}
+
+	return 0, fmt.Errorf("leaf node client not found for host %s", leafHost)
+}
+
+func (s *Server) RemoveLeafNodeRemote(leafHost string) {
+	cid, err := s.getLeafClientID(leafHost)
+	if err != nil {
+		return
+	}
+
+	c := s.GetLeafNode(cid)
+	if c == nil {
+		return
+	}
+
+	c.setNoReconnect()
+	c.closeConnection(ClientClosed)
+
+	s.mu.Lock()
+	{
+		newLeafRemoteCfgs := make([]*leafNodeCfg, 0, len(s.leafRemoteCfgs)-1)
+		for _, leafRemoteCfg := range s.leafRemoteCfgs {
+			isRemovedLeaf := containsHost(leafRemoteCfg.URLs, leafHost)
+			if !isRemovedLeaf {
+				newLeafRemoteCfgs = append(newLeafRemoteCfgs, leafRemoteCfg)
+			}
+		}
+
+		s.leafRemoteCfgs = newLeafRemoteCfgs
+	}
+	{
+		opts := s.getOpts()
+		newLeafNodeRemotes := make([]*RemoteLeafOpts, 0, len(opts.LeafNode.Remotes)-1)
+		for _, leafNodeRemote := range opts.LeafNode.Remotes {
+			isRemovedLeaf := containsHost(leafNodeRemote.URLs, leafHost)
+			if !isRemovedLeaf {
+				newLeafNodeRemotes = append(newLeafNodeRemotes, leafNodeRemote)
+			}
+		}
+		opts.LeafNode.Remotes = newLeafNodeRemotes
+		s.setOpts(opts)
+	}
+	s.mu.Unlock()
+}
+
+func (s *Server) AddLeafNodeRemote(remote *RemoteLeafOpts) {
+	s.mu.Lock()
+	{
+		opts := s.getOpts()
+		opts.LeafNode.Remotes = append(opts.LeafNode.Remotes, remote)
+		s.setOpts(opts)
+	}
+	s.mu.Unlock()
+
+	remoteAsSlice := []*RemoteLeafOpts{remote}
+	s.solicitLeafNodeRemotes(remoteAsSlice)
+}
+
 // Will perform the client-side TLS handshake if needed. Assumes that this
 // is called by the solicit side (remote will be non nil). Returns `true`
 // if TLS is required, `false` otherwise.
