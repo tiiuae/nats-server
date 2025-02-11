@@ -124,6 +124,9 @@ type StreamConfig struct {
 
 	// Metadata is additional metadata for the Stream.
 	Metadata map[string]string `json:"metadata,omitempty"`
+
+	// IsClusteredSource indicates that this stream is a source for a clustered stream.
+	IsClusteredSource bool `json:"is_clustered_source"`
 }
 
 // clone performs a deep copy of the StreamConfig struct, returning a new clone with
@@ -496,6 +499,8 @@ type stream struct {
 
 	batches    *batching   // Inflight batches prior to committing them.
 	batchApply *batchApply // State to check for batch completeness before applying it.
+
+	isClusteredSource bool
 }
 
 // inflightSubjectRunningTotal stores a running total of inflight messages for a specific subject.
@@ -835,12 +840,13 @@ func (a *Account) addStreamWithAssignment(config *StreamConfig, fsConfig *FileSt
 			ipqLimitByLen[*inMsg](mlen),
 			ipqLimitBySize[*inMsg](msz),
 		),
-		gets:    newIPQueue[*directGetReq](s, qpfx+"direct gets"),
-		qch:     make(chan struct{}),
-		mqch:    make(chan struct{}),
-		uch:     make(chan struct{}, 4),
-		sch:     make(chan struct{}, 1),
-		created: time.Now().UTC(),
+		gets:              newIPQueue[*directGetReq](s, qpfx+"direct gets"),
+		qch:               make(chan struct{}),
+		mqch:              make(chan struct{}),
+		uch:               make(chan struct{}, 4),
+		sch:               make(chan struct{}, 1),
+		created:           time.Now().UTC(),
+		isClusteredSource: cfg.IsClusteredSource,
 	}
 
 	// Add created timestamp used for the store, must match that of the stream assignment if it exists.
@@ -3208,10 +3214,10 @@ func (mset *stream) setupMirrorConsumer() error {
 			AckPolicy:         AckNone,
 			AckWait:           22 * time.Hour,
 			MaxDeliver:        1,
-			Heartbeat:         sourceHealthHB,
+			Heartbeat:         mset.srv.opts.ConsumerHeartbeatInterval,
 			FlowControl:       true,
 			Direct:            true,
-			InactiveThreshold: sourceHealthCheckInterval,
+			InactiveThreshold: mset.srv.opts.ConsumerInactiveThreshold,
 		},
 	}
 
@@ -3578,10 +3584,10 @@ func (mset *stream) trySetupSourceConsumer(iname string, seq uint64, startTime t
 			AckPolicy:         AckNone,
 			AckWait:           22 * time.Hour,
 			MaxDeliver:        1,
-			Heartbeat:         sourceHealthHB,
+			Heartbeat:         mset.srv.opts.ConsumerHeartbeatInterval,
 			FlowControl:       true,
 			Direct:            true,
-			InactiveThreshold: sourceHealthCheckInterval,
+			InactiveThreshold: mset.srv.opts.ConsumerInactiveThreshold,
 		},
 	}
 
@@ -5795,6 +5801,25 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 						return apiErr
 					}
 				}
+			}
+		}
+
+		// Do real check only if not clustered or traceOnly flag is set.
+		if !isClustered && mset.isClusteredSource {
+			ss := getHeader(JSStreamSource, hdr)
+			if len(ss) != 0 {
+				_, _, sseq := streamAndSeq(string(ss))
+				if mset.lseq >= sseq {
+					mset.mu.Unlock()
+					bumpCLFS()
+					if canRespond {
+						response := append(pubAck, strconv.FormatUint(sseq, 10)...)
+						response = append(response, ",\"duplicate\": true}"...)
+						outq.sendMsg(reply, response)
+					}
+					return nil
+				}
+
 			}
 		}
 
