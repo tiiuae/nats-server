@@ -2529,7 +2529,7 @@ func (s *Server) Start() {
 	if opts.LeafNode.Port != 0 {
 		// Will resolve or assign the advertise address for the leafnode listener.
 		// We need that in StartRouting().
-		s.startLeafNodeAcceptLoop()
+		s.startLeafNodeAcceptLoop(nil)
 	}
 
 	// Solicit remote servers for leaf node connections.
