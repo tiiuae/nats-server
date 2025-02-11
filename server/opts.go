@@ -214,6 +214,8 @@ type RemoteLeafOpts struct {
 	Hub               bool             `json:"hub,omitempty"`
 	DenyImports       []string         `json:"-"`
 	DenyExports       []string         `json:"-"`
+	AllowImports      []string         `json:"-"`
+	AllowExports      []string         `json:"-"`
 
 	// Compression options for this remote. Each remote could have a different
 	// setting and also be different from the LeafNode options.
@@ -291,6 +293,8 @@ type Options struct {
 	Authorization              string        `json:"-"`
 	AuthCallout                *AuthCallout  `json:"-"`
 	PingInterval               time.Duration `json:"ping_interval"`
+	ConsumerHeartbeatInterval  time.Duration `json:"consumer_heartbeat_interval"`
+	ConsumerInactiveThreshold  time.Duration `json:"consumer_inactive_threshold"`
 	MaxPingsOut                int           `json:"ping_max"`
 	HTTPHost                   string        `json:"http_host"`
 	HTTPPort                   int           `json:"http_port"`
@@ -1119,6 +1123,10 @@ func (o *Options) processConfigFileLine(k string, v any, errors *[]error, warnin
 		}
 	case "ping_interval":
 		o.PingInterval = parseDuration("ping_interval", tk, v, errors, warnings)
+	case "consumer_heartbeat_interval":
+		o.ConsumerHeartbeatInterval = parseDuration("consumer_heartbeat_interval", tk, v, errors, warnings)
+	case "consumer_inactive_threshold":
+		o.ConsumerInactiveThreshold = parseDuration("consumer_inactive_threshold", tk, v, errors, warnings)
 	case "ping_max":
 		o.MaxPingsOut = int(v.(int64))
 	case "tls":
@@ -2641,6 +2649,20 @@ func parseRemoteLeafNodes(v any, errors *[]error, warnings *[]error) ([]*RemoteL
 					continue
 				}
 				remote.DenyExports = subjects
+			case "allow_imports", "allow_import":
+				subjects, err := parsePermSubjects(tk, errors)
+				if err != nil {
+					*errors = append(*errors, err)
+					continue
+				}
+				remote.AllowImports = subjects
+			case "allow_exports", "allow_export":
+				subjects, err := parsePermSubjects(tk, errors)
+				if err != nil {
+					*errors = append(*errors, err)
+					continue
+				}
+				remote.AllowExports = subjects
 			case "ws_compress", "ws_compression", "websocket_compress", "websocket_compression":
 				remote.Websocket.Compression = v.(bool)
 			case "ws_no_masking", "websocket_no_masking":
@@ -5275,6 +5297,12 @@ func setBaselineOptions(opts *Options) {
 	}
 	if opts.PingInterval == 0 {
 		opts.PingInterval = DEFAULT_PING_INTERVAL
+	}
+	if opts.ConsumerHeartbeatInterval == 0 {
+		opts.ConsumerHeartbeatInterval = sourceHealthHB
+	}
+	if opts.ConsumerInactiveThreshold == 0 {
+		opts.ConsumerInactiveThreshold = sourceHealthCheckInterval
 	}
 	if opts.MaxPingsOut == 0 {
 		opts.MaxPingsOut = DEFAULT_PING_MAX_OUT
