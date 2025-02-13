@@ -400,7 +400,7 @@ func newLeafNodeCfg(remote *RemoteLeafOpts) *leafNodeCfg {
 		RemoteLeafOpts: remote,
 		urls:           make([]*url.URL, 0, len(remote.URLs)),
 	}
-	if len(remote.DenyExports) > 0 || len(remote.DenyImports) > 0 {
+	if len(remote.DenyExports) > 0 || len(remote.DenyImports) > 0 || len(remote.AllowImports) > 0 || len(remote.AllowExports) > 0 {
 		perms := &Permissions{}
 		if len(remote.DenyExports) > 0 {
 			perms.Publish = &SubjectPermission{Deny: remote.DenyExports}
