@@ -1163,7 +1163,7 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 
 func containsHost(urls []*url.URL, host string) bool {
 	for _, u := range urls {
-		if u.Host == host {
+		if u.Hostname() == host {
 			return true
 		}
 	}
@@ -1177,6 +1177,10 @@ func (s *Server) getLeafClientID(leafHost string) (uint64, error) {
 
 	for _, v := range s.leafs {
 		v.mu.Lock()
+		// Leaf remote is nil for non-solicited leafs.
+		if v.leaf == nil || v.leaf.remote == nil {
+			continue
+		}
 		if containsHost(v.leaf.remote.URLs, leafHost) {
 			v.mu.Unlock()
 			return v.cid, nil
@@ -1188,19 +1192,6 @@ func (s *Server) getLeafClientID(leafHost string) (uint64, error) {
 }
 
 func (s *Server) RemoveLeafNodeRemote(leafHost string) {
-	cid, err := s.getLeafClientID(leafHost)
-	if err != nil {
-		return
-	}
-
-	c := s.GetLeafNode(cid)
-	if c == nil {
-		return
-	}
-
-	c.setNoReconnect()
-	c.closeConnection(ClientClosed)
-
 	s.mu.Lock()
 	{
 		newLeafRemoteCfgs := make([]*leafNodeCfg, 0, len(s.leafRemoteCfgs)-1)
@@ -1226,15 +1217,28 @@ func (s *Server) RemoveLeafNodeRemote(leafHost string) {
 		s.setOpts(opts)
 	}
 	s.mu.Unlock()
+
+	cid, err := s.getLeafClientID(leafHost)
+	if err != nil {
+		return
+	}
+
+	c := s.GetLeafNode(cid)
+	if c == nil {
+		return
+	}
+
+	c.setNoReconnect()
+	c.closeConnection(ClientClosed)
 }
 
 func (s *Server) AddLeafNodeRemote(remote *RemoteLeafOpts) {
 	s.mu.Lock()
-	{
-		opts := s.getOpts()
-		opts.LeafNode.Remotes = append(opts.LeafNode.Remotes, remote)
-		s.setOpts(opts)
-	}
+
+	opts := s.getOpts()
+	opts.LeafNode.Remotes = append(opts.LeafNode.Remotes, remote)
+	s.setOpts(opts)
+
 	s.mu.Unlock()
 
 	remoteAsSlice := []*RemoteLeafOpts{remote}
