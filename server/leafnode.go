@@ -1171,44 +1171,48 @@ func containsHost(urls []*url.URL, host string) bool {
 }
 
 // GetLeafClientID returns leaf's client ID or -1 if not found.
-func (s *Server) getLeafClientID(leafHost string) (uint64, error) {
+func (s *Server) getLeafNodeRemoteClientID(leafHostname string) (uint64, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	for _, v := range s.leafs {
-		v.mu.Lock()
+	for _, c := range s.leafs {
+		c.mu.Lock()
 		// Leaf remote is nil for non-solicited leafs.
-		if v.leaf == nil || v.leaf.remote == nil {
+		if c.leaf == nil || c.leaf.remote == nil {
+			c.mu.Unlock()
 			continue
 		}
-		if containsHost(v.leaf.remote.URLs, leafHost) {
-			v.mu.Unlock()
-			return v.cid, nil
+		if containsHost(c.leaf.remote.URLs, leafHostname) {
+			c.mu.Unlock()
+			return c.cid, nil
 		}
-		v.mu.Unlock()
+		c.mu.Unlock()
 	}
 
-	return 0, fmt.Errorf("leaf node client not found for host %s", leafHost)
+	return 0, fmt.Errorf("leaf node client not found for host %s", leafHostname)
 }
 
-func (s *Server) RemoveLeafNodeRemote(leafHost string) {
+func (s *Server) RemoveLeafNodeRemote(leafHostname string) {
 	s.mu.Lock()
+
+	s.Debugf("Removing leaf node remote (%v) from server.leafRemoteCfgs", leafHostname)
 	{
 		newLeafRemoteCfgs := make([]*leafNodeCfg, 0, len(s.leafRemoteCfgs)-1)
 		for _, leafRemoteCfg := range s.leafRemoteCfgs {
-			isRemovedLeaf := containsHost(leafRemoteCfg.URLs, leafHost)
+			isRemovedLeaf := containsHost(leafRemoteCfg.URLs, leafHostname)
 			if !isRemovedLeaf {
 				newLeafRemoteCfgs = append(newLeafRemoteCfgs, leafRemoteCfg)
 			}
 		}
-
 		s.leafRemoteCfgs = newLeafRemoteCfgs
 	}
+
+	s.Debugf("Removing leaf node remote (%v) from server.opts", leafHostname)
 	{
 		opts := s.getOpts()
 		newLeafNodeRemotes := make([]*RemoteLeafOpts, 0, len(opts.LeafNode.Remotes)-1)
 		for _, leafNodeRemote := range opts.LeafNode.Remotes {
-			isRemovedLeaf := containsHost(leafNodeRemote.URLs, leafHost)
+			isRemovedLeaf := containsHost(leafNodeRemote.URLs, leafHostname)
 			if !isRemovedLeaf {
 				newLeafNodeRemotes = append(newLeafNodeRemotes, leafNodeRemote)
 			}
@@ -1218,29 +1222,40 @@ func (s *Server) RemoveLeafNodeRemote(leafHost string) {
 	}
 	s.mu.Unlock()
 
-	cid, err := s.getLeafClientID(leafHost)
+	s.Debugf("Getting client ID for leaf node remote (%v)", leafHostname)
+	cid, err := s.getLeafNodeRemoteClientID(leafHostname)
 	if err != nil {
+		s.Debugf("Leaf node remote (%v) not found in server.leafs", leafHostname)
 		return
 	}
 
 	c := s.GetLeafNode(cid)
 	if c == nil {
+		s.Warnf("Leaf node remote (%v) not found in server.leafs", leafHostname)
 		return
 	}
 
+	s.Debugf("Closing leaf node remote (%v) connection", leafHostname)
 	c.setNoReconnect()
 	c.closeConnection(ClientClosed)
 }
 
 func (s *Server) AddLeafNodeRemote(remote *RemoteLeafOpts) {
+	if remote == nil || len(remote.URLs) == 0 {
+		return
+	}
+	firstURLHostname := remote.URLs[0].Hostname()
+
+	s.Debugf("Adding leaf node remote (%v) to server.opts", firstURLHostname)
 	s.mu.Lock()
-
-	opts := s.getOpts()
-	opts.LeafNode.Remotes = append(opts.LeafNode.Remotes, remote)
-	s.setOpts(opts)
-
+	{
+		opts := s.getOpts()
+		opts.LeafNode.Remotes = append(opts.LeafNode.Remotes, remote)
+		s.setOpts(opts)
+	}
 	s.mu.Unlock()
 
+	s.Debugf("Soliticing leaf node remote (%v) connection", firstURLHostname)
 	remoteAsSlice := []*RemoteLeafOpts{remote}
 	s.solicitLeafNodeRemotes(remoteAsSlice)
 }
