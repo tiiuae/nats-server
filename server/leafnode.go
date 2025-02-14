@@ -150,6 +150,12 @@ func (s *Server) solicitLeafNodeRemotes(remotes []*RemoteLeafOpts) {
 			if len(remote.DenyImports) > 0 {
 				s.Noticef("Remote for System Account uses restricted import permissions")
 			}
+			if len(remote.AllowImports) > 0 {
+				s.Noticef("Remote for System Account uses allowed import permissions")
+			}
+			if len(remote.AllowExports) > 0 {
+				s.Noticef("Remote for System Account uses allowed export permissions")
+			}
 		}
 		s.mu.Unlock()
 		if creds != _EMPTY_ {
@@ -394,13 +400,25 @@ func newLeafNodeCfg(remote *RemoteLeafOpts) *leafNodeCfg {
 		RemoteLeafOpts: remote,
 		urls:           make([]*url.URL, 0, len(remote.URLs)),
 	}
-	if len(remote.DenyExports) > 0 || len(remote.DenyImports) > 0 {
+	if len(remote.DenyExports) > 0 || len(remote.DenyImports) > 0 || len(remote.AllowImports) > 0 || len(remote.AllowExports) > 0 {
 		perms := &Permissions{}
 		if len(remote.DenyExports) > 0 {
 			perms.Publish = &SubjectPermission{Deny: remote.DenyExports}
 		}
 		if len(remote.DenyImports) > 0 {
 			perms.Subscribe = &SubjectPermission{Deny: remote.DenyImports}
+		}
+		if len(remote.AllowImports) > 0 {
+			if perms.Subscribe == nil {
+				perms.Subscribe = &SubjectPermission{}
+			}
+			perms.Subscribe.Allow = remote.AllowImports
+		}
+		if len(remote.AllowExports) > 0 {
+			if perms.Publish == nil {
+				perms.Publish = &SubjectPermission{}
+			}
+			perms.Publish.Allow = remote.AllowExports
 		}
 		cfg.perms = perms
 	}
@@ -790,6 +808,7 @@ func (c *client) sendLeafConnect(clusterName string, headers bool) error {
 		Headers:       headers,
 		JetStream:     c.acc.jetStreamConfigured(),
 		DenyPub:       c.leaf.remote.DenyImports,
+		AllowPub:      c.leaf.remote.AllowImports,
 		Compression:   c.leaf.compression,
 		RemoteAccount: c.acc.GetName(),
 	}
@@ -1142,6 +1161,105 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 	return c
 }
 
+func containsHost(urls []*url.URL, host string) bool {
+	for _, u := range urls {
+		if u.Hostname() == host {
+			return true
+		}
+	}
+	return false
+}
+
+// GetLeafClientID returns leaf's client ID or -1 if not found.
+func (s *Server) getLeafNodeRemoteClientID(leafHostname string) (uint64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, c := range s.leafs {
+		c.mu.Lock()
+		// Leaf remote is nil for non-solicited leafs.
+		if c.leaf == nil || c.leaf.remote == nil {
+			c.mu.Unlock()
+			continue
+		}
+		if containsHost(c.leaf.remote.URLs, leafHostname) {
+			c.mu.Unlock()
+			return c.cid, nil
+		}
+		c.mu.Unlock()
+	}
+
+	return 0, fmt.Errorf("leaf node client not found for host %s", leafHostname)
+}
+
+func (s *Server) RemoveLeafNodeRemote(leafHostname string) {
+	s.mu.Lock()
+
+	s.Debugf("Removing leaf node remote (%v) from server.leafRemoteCfgs", leafHostname)
+	{
+		newLeafRemoteCfgs := make([]*leafNodeCfg, 0, len(s.leafRemoteCfgs)-1)
+		for _, leafRemoteCfg := range s.leafRemoteCfgs {
+			isRemovedLeaf := containsHost(leafRemoteCfg.URLs, leafHostname)
+			if !isRemovedLeaf {
+				newLeafRemoteCfgs = append(newLeafRemoteCfgs, leafRemoteCfg)
+			}
+		}
+		s.leafRemoteCfgs = newLeafRemoteCfgs
+	}
+
+	s.Debugf("Removing leaf node remote (%v) from server.opts", leafHostname)
+	{
+		opts := s.getOpts()
+		newLeafNodeRemotes := make([]*RemoteLeafOpts, 0, len(opts.LeafNode.Remotes)-1)
+		for _, leafNodeRemote := range opts.LeafNode.Remotes {
+			isRemovedLeaf := containsHost(leafNodeRemote.URLs, leafHostname)
+			if !isRemovedLeaf {
+				newLeafNodeRemotes = append(newLeafNodeRemotes, leafNodeRemote)
+			}
+		}
+		opts.LeafNode.Remotes = newLeafNodeRemotes
+		s.setOpts(opts)
+	}
+	s.mu.Unlock()
+
+	s.Debugf("Getting client ID for leaf node remote (%v)", leafHostname)
+	cid, err := s.getLeafNodeRemoteClientID(leafHostname)
+	if err != nil {
+		s.Debugf("Leaf node remote (%v) not found in server.leafs", leafHostname)
+		return
+	}
+
+	c := s.GetLeafNode(cid)
+	if c == nil {
+		s.Warnf("Leaf node remote (%v) not found in server.leafs", leafHostname)
+		return
+	}
+
+	s.Debugf("Closing leaf node remote (%v) connection", leafHostname)
+	c.setNoReconnect()
+	c.closeConnection(ClientClosed)
+}
+
+func (s *Server) AddLeafNodeRemote(remote *RemoteLeafOpts) {
+	if remote == nil || len(remote.URLs) == 0 {
+		return
+	}
+	firstURLHostname := remote.URLs[0].Hostname()
+
+	s.Debugf("Adding leaf node remote (%v) to server.opts", firstURLHostname)
+	s.mu.Lock()
+	{
+		opts := s.getOpts()
+		opts.LeafNode.Remotes = append(opts.LeafNode.Remotes, remote)
+		s.setOpts(opts)
+	}
+	s.mu.Unlock()
+
+	s.Debugf("Soliticing leaf node remote (%v) connection", firstURLHostname)
+	remoteAsSlice := []*RemoteLeafOpts{remote}
+	s.solicitLeafNodeRemotes(remoteAsSlice)
+}
+
 // Will perform the client-side TLS handshake if needed. Assumes that this
 // is called by the solicit side (remote will be non nil). Returns `true`
 // if TLS is required, `false` otherwise.
@@ -1335,7 +1453,20 @@ func (c *client) processLeafnodeInfo(info *Info) {
 				}
 				perms.Subscribe.Deny = append(perms.Subscribe.Deny, remote.DenyImports...)
 			}
+			if len(remote.AllowExports) > 0 {
+				if perms.Publish == nil {
+					perms.Publish = &SubjectPermission{}
+				}
+				perms.Publish.Allow = append(perms.Publish.Allow, remote.AllowExports...)
+			}
+			if len(remote.AllowImports) > 0 {
+				if perms.Subscribe == nil {
+					perms.Subscribe = &SubjectPermission{}
+				}
+				perms.Subscribe.Allow = append(perms.Subscribe.Allow, remote.AllowImports...)
+			}
 		}
+		fmt.Printf("perms: pub: %+v - sub: %+v\n", perms.Publish, perms.Subscribe)
 		c.setPermissions(perms)
 	}
 
@@ -1733,6 +1864,7 @@ type leafConnectInfo struct {
 	Headers   bool     `json:"headers,omitempty"`
 	JetStream bool     `json:"jetstream,omitempty"`
 	DenyPub   []string `json:"deny_pub,omitempty"`
+	AllowPub  []string `json:"allow_pub,omitempty"`
 
 	// There was an existing field called:
 	// >> Comp bool `json:"compression,omitempty"`
@@ -1865,6 +1997,9 @@ func (c *client) processLeafNodeConnect(s *Server, arg []byte, lang string) erro
 
 	// If we received pub deny permissions from the other end, merge with existing ones.
 	c.mergeDenyPermissions(pub, proto.DenyPub)
+
+	// If we received pub allow permissions from the other end, merge with existing ones.
+	c.mergeAllowPermissions(pubAllow, proto.AllowPub)
 
 	c.mu.Unlock()
 
@@ -2046,7 +2181,7 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 	}
 	// Detect loops by subscribing to a specific subject and checking
 	// if this sub is coming back to us.
-	c.leaf.smap[lds]++
+	// c.leaf.smap[lds]++
 
 	// Check if we need to add an existing siReply to our map.
 	// This will be a prefix so add on the wildcard.
@@ -2397,6 +2532,7 @@ func (c *client) processLeafSub(argo []byte) (err error) {
 
 	if ldsPrefix && bytesToString(sub.subject) == acc.getLDSubject() {
 		c.mu.Unlock()
+		c.Warnf("sub.subject: %s", string(sub.subject))
 		c.handleLeafNodeLoop(true)
 		return nil
 	}
@@ -2490,6 +2626,7 @@ func (c *client) processLeafSub(argo []byte) (err error) {
 // or private option (for tests). Sends the error to the other side, log and
 // close the connection.
 func (c *client) handleLeafNodeLoop(sendErr bool) {
+	c.Errorf("handleLeafNodeLoop")
 	accName, delay := c.setLeafConnectDelayIfSoliciting(leafNodeReconnectDelayAfterLoopDetected)
 	errTxt := fmt.Sprintf("Loop detected for leafnode account=%q. Delaying attempt to reconnect for %v", accName, delay)
 	if sendErr {
@@ -2807,6 +2944,7 @@ func (c *client) leafPermViolation(pub bool, subj []byte) {
 
 // Invoked from generic processErr() for LEAF connections.
 func (c *client) leafProcessErr(errStr string) {
+	c.Errorf("leafProcessErr: %s", errStr)
 	// Check if we got a cluster name collision.
 	if strings.Contains(errStr, ErrLeafNodeHasSameClusterName.Error()) {
 		_, delay := c.setLeafConnectDelayIfSoliciting(leafNodeReconnectDelayAfterClusterNameSame)
@@ -3038,6 +3176,7 @@ func (s *Server) leafNodeResumeConnectProcess(c *client) {
 // protocol and leafNodeResumeConnectProcess.
 // This will send LS+ the CONNECT protocol and register the leaf node.
 func (s *Server) leafNodeFinishConnectProcess(c *client) {
+	c.Errorf("leafNodeFinishConnectProcess")
 	c.mu.Lock()
 	if !c.flags.setIfNotSet(connectProcessFinished) {
 		c.mu.Unlock()
@@ -3066,6 +3205,7 @@ func (s *Server) leafNodeFinishConnectProcess(c *client) {
 			c.maxAccountConnExceeded()
 			return
 		} else if err == ErrLeafNodeLoop {
+			c.Warnf("handleLeafNodeLoop")
 			c.handleLeafNodeLoop(true)
 			return
 		}
