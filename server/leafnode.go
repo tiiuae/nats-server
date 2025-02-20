@@ -1000,6 +1000,9 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 	now := time.Now().UTC()
 
 	c := &client{srv: s, nc: conn, kind: LEAF, opts: defaultOpts, mpay: maxPay, msubs: maxSubs, start: now, last: now}
+	if qcs, ok := conn.(*quicConnStream); ok {
+		c.quicConnStream = qcs
+	}
 	// Do not update the smap here, we need to do it in initLeafNodeSmapAndSendSubs
 	c.leaf = &leaf{}
 
@@ -1224,6 +1227,10 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 
 	// Spin up the read loop.
 	s.startGoRoutine(func() { c.readLoop(preBuf) })
+
+	if quic {
+		s.startGoRoutine(func() { c.readDatagramLoop(nil) })
+	}
 
 	// We will spin the write loop for solicited connections only
 	// when processing the INFO and after switching to TLS if needed.

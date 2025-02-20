@@ -15,6 +15,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -35,6 +36,7 @@ import (
 
 	"github.com/klauspost/compress/s2"
 	"github.com/nats-io/jwt/v2"
+	"github.com/quic-go/quic-go"
 	"github.com/tiiuae/nats-server/v2/internal/fastrand"
 )
 
@@ -224,6 +226,10 @@ const (
 	pmrMsgImportedFromService
 )
 
+const reliabilityHeader = "Reliability"
+
+var reliabilityUnrealiable = []byte("unreliable")
+
 type client struct {
 	// Here first because of use of atomics, and memory alignment.
 	stats
@@ -245,22 +251,23 @@ type client struct {
 	nonce      []byte
 	pubKey     string
 	nc         net.Conn
-	ncs        atomic.Value
-	out        outbound
-	user       *NkeyUser
-	host       string
-	port       uint16
-	subs       map[string]*subscription
-	replies    map[string]*resp
-	mperms     *msgDeny
-	darray     []string
-	pcd        map[*client]struct{}
-	atmr       *time.Timer
-	expires    time.Time
-	ping       pinfo
-	msgb       [msgScratchSize]byte
-	last       time.Time
-	lastIn     time.Time
+	*quicConnStream
+	ncs     atomic.Value
+	out     outbound
+	user    *NkeyUser
+	host    string
+	port    uint16
+	subs    map[string]*subscription
+	replies map[string]*resp
+	mperms  *msgDeny
+	darray  []string
+	pcd     map[*client]struct{}
+	atmr    *time.Timer
+	expires time.Time
+	ping    pinfo
+	msgb    [msgScratchSize]byte
+	last    time.Time
+	lastIn  time.Time
 
 	headers bool
 
@@ -1497,6 +1504,191 @@ func (c *client) readLoop(pre []byte) {
 
 		if cpacc && (c.in.start.Sub(lpacc)) >= closedSubsCheckInterval {
 			c.pruneClosedSubFromPerAccountCache()
+			lpacc = time.Now()
+		}
+	}
+}
+
+func (c *client) readDatagramLoop(pre []byte) {
+	// Grab the connection off the client, it will be cleared on a close.
+	// We check for that after the loop, but want to avoid a nil dereference
+	c.mu.Lock()
+	s := c.srv
+	defer s.grWG.Done()
+	if c.isClosed() {
+		c.mu.Unlock()
+		return
+	}
+	nc := c.nc
+	bufSize := startBufSize
+
+	// Check the per-account-cache for closed subscriptions
+	cpacc := c.kind == ROUTER || c.kind == GATEWAY
+	// Last per-account-cache check for closed subscriptions
+	lpacc := time.Now()
+	acc := c.acc
+	// checkCompress := c.kind == ROUTER || c.kind == LEAF
+	c.mu.Unlock()
+
+	qcs, ok := nc.(*quicConnStream)
+	if !ok {
+		c.Errorf("readDatagramLoop requires nc to be a *quicConnStream, found %T", nc)
+		c.closeConnection(ClientClosed)
+		return
+	}
+
+	// Start read buffer.
+	b := make([]byte, bufSize)
+
+	// Websocket clients will return several slices if there are multiple
+	// websocket frames in the blind read. For non WS clients though, we
+	// will always have 1 slice per loop iteration. So we define this here
+	// so non WS clients will use bufs[0] = b[:n].
+	var _bufs [1][]byte
+	bufs := _bufs[:1]
+
+	var decompress bool
+	var reader io.Reader
+	reader = nc
+
+	for {
+		var n int
+		var err error
+
+		// If we have a pre buffer parse that first.
+		if len(pre) > 0 {
+			b = pre
+			n = len(pre)
+			pre = nil
+		} else {
+			b, err = qcs.ReceiveDatagram(context.Background())
+			c.Debugf("receive datagram, err: %v", err)
+			n = len(b)
+			if err != nil {
+				var appErr *quic.ApplicationError
+				if errors.As(err, &appErr) && appErr.ErrorCode != 0 {
+					c.Errorf("read error: %v", err)
+				}
+				c.closeConnection(closedStateForErr(err))
+				return
+			}
+		}
+		bufs[0] = b[:n]
+
+		// Check if the account has mappings and if so set the local readcache flag.
+		// We check here to make sure any changes such as config reload are reflected here.
+		// if c.kind == CLIENT || c.kind == LEAF {
+		// 	if acc.hasMappings() {
+		// 		c.in.flags.set(hasMappings)
+		// 	} else {
+		// 		c.in.flags.clear(hasMappings)
+		// 	}
+		// }
+
+		start := time.Now()
+
+		// Clear inbound stats cache
+		msgs := 0
+		bytes := 0
+		subs := 0
+
+		// Main call into parser for inbound data. This will generate callouts
+		// to process messages, etc.
+		for i := 0; i < len(bufs); i++ {
+			if err := c.parse(bufs[i]); err != nil {
+				if err == ErrMinimumVersionRequired {
+					// Special case here, currently only for leaf node connections.
+					// When process the CONNECT protocol, if the minimum version
+					// required was not met, an error was printed and sent back to
+					// the remote, and connection was closed after a certain delay
+					// (to avoid "rapid" reconnection from the remote).
+					// We don't need to do any of the things below, simply return.
+					return
+				}
+				if dur := time.Since(start); dur >= readLoopReportThreshold {
+					c.Warnf("Readloop processing time: %v", dur)
+				}
+				// Need to call flushClients because some of the clients have been
+				// assigned messages and their "fsp" incremented, and need now to be
+				// decremented and their writeLoop signaled.
+				// c.flushClients(0)
+				// handled inline
+				if err != ErrMaxPayload && err != ErrAuthentication {
+					c.Error(err)
+					c.closeConnection(ProtocolViolation)
+				}
+				return
+			}
+		}
+
+		// If we are a ROUTER/LEAF and have processed an INFO, it is possible that
+		// we are asked to switch to compression now.
+		// if checkCompress && c.in.flags.isSet(switchToCompression) {
+		// 	c.in.flags.clear(switchToCompression)
+		// 	// For now we support only s2 compression...
+		// 	reader = s2.NewReader(nc)
+		// 	decompress = true
+		// }
+
+		// Updates stats for client and server that were collected
+		// from parsing through the buffer.
+		if msgs > 0 {
+			atomic.AddInt64(&c.inMsgs, int64(msgs))
+			atomic.AddInt64(&c.inBytes, int64(bytes))
+			if acc != nil {
+				atomic.AddInt64(&acc.inMsgs, int64(msgs))
+				atomic.AddInt64(&acc.inBytes, int64(bytes))
+			}
+			atomic.AddInt64(&s.inMsgs, int64(msgs))
+			atomic.AddInt64(&s.inBytes, int64(bytes))
+		}
+
+		// Signal to writeLoop to flush to socket.
+		// last := c.flushClients(0)
+		last := time.Now()
+
+		// Update activity, check read buffer size.
+		c.mu.Lock()
+
+		// Activity based on interest changes or data/msgs.
+		// Also update last receive activity for ping sender
+		if msgs > 0 || subs > 0 {
+			c.last = last
+			c.lastIn = last
+		}
+
+		// re-snapshot the account since it can change during reload, etc.
+		acc = c.acc
+		// Refresh nc because in some cases, we have upgraded c.nc to TLS.
+		if nc != c.nc {
+			nc = c.nc
+			if decompress && nc != nil {
+				// For now we support only s2 compression...
+				reader.(*s2.Reader).Reset(nc)
+			} else if !decompress {
+				reader = nc
+			}
+		}
+		c.mu.Unlock()
+
+		// Connection was closed
+		if nc == nil {
+			return
+		}
+
+		if dur := time.Since(start); dur >= readLoopReportThreshold {
+			c.Warnf("Datagram readloop processing time: %v", dur)
+		}
+
+		// We could have had a read error from above but still read some data.
+		// If so do the close here unconditionally.
+		if err != nil {
+			c.closeConnection(closedStateForErr(err))
+			return
+		}
+
+		if cpacc && (start.Sub(lpacc)) >= closedSubsCheckInterval {
+			// c.pruneClosedSubFromPerAccountCache()
 			lpacc = time.Now()
 		}
 	}
@@ -3624,12 +3816,23 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 		}
 	}
 
-	// Queue to outbound buffer
-	client.queueOutbound(mh)
-	client.queueOutbound(msg)
-	if prodIsMQTT {
-		// Need to add CR_LF since MQTT producers don't send CR_LF
-		client.queueOutbound([]byte(CR_LF))
+	var datagramErr error
+	if c.pa.hdr > 0 &&
+		bytes.Equal(getHeader(reliabilityHeader, msg[:c.pa.hdr]), reliabilityUnrealiable) &&
+		client.quicConnStream != nil {
+		fullMsg := make([]byte, len(mh)+len(msg))
+		copy(fullMsg, mh)
+		copy(fullMsg[len(mh):], msg)
+		datagramErr = client.quicConnStream.SendDatagram(fullMsg)
+		c.Debugf("deliver datagram on %s, err: %v", c.pa.subject, datagramErr)
+	} else {
+		// Queue to outbound buffer
+		client.queueOutbound(mh)
+		client.queueOutbound(msg)
+		if prodIsMQTT {
+			// Need to add CR_LF since MQTT producers don't send CR_LF
+			client.queueOutbound([]byte(CR_LF))
+		}
 	}
 
 	// If we are tracking dynamic publish permissions that track reply subjects,
@@ -3659,6 +3862,10 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 	}
 
 	client.mu.Unlock()
+
+	if datagramErr != nil {
+		client.Debugf("Error sending datagram: %v", datagramErr)
+	}
 
 	return true
 }

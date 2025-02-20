@@ -20,6 +20,7 @@ const (
 
 var defaultQUICConfig = &quic.Config{
 	KeepAlivePeriod: 10 * time.Second,
+	EnableDatagrams: true,
 }
 
 type quicConnStream struct {
@@ -282,6 +283,8 @@ func (s *Server) createQUICClient(conn net.Conn) *client {
 
 	// Spin up the read loop.
 	s.startGoRoutine(func() { c.readLoop(nil) })
+
+	s.startGoRoutine(func() { c.readDatagramLoop(nil) })
 
 	// Spin up the write loop.
 	s.startGoRoutine(func() { c.writeLoop() })
