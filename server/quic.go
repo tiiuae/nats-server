@@ -151,13 +151,7 @@ func (s *Server) quicListen(hp string, tlsConfig *tls.Config, o *QUICOpts) (ql *
 		return nil, fmt.Errorf("net.ListenUDP: %w", err)
 	}
 	ql = &quicListener{transport: &quic.Transport{Conn: conn}}
-	if o.QUICConfig == nil {
-		ql.listener, err = ql.transport.Listen(tlsConfig, &quic.Config{
-			HandshakeIdleTimeout: o.HandshakeIdleTimeout,
-		})
-	} else {
-		ql.listener, err = ql.transport.Listen(tlsConfig, o.QUICConfig.Clone())
-	}
+	ql.listener, err = ql.transport.Listen(tlsConfig, makeLeafQUICConfig(o, o.HandshakeIdleTimeout))
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
