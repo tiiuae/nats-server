@@ -1193,7 +1193,7 @@ func (s *Server) startWebsocketServer() {
 				res.conn.Close()
 				return
 			}
-			s.createLeafNode(res.conn, nil, nil, res.ws, false)
+			s.createLeafNode(res.conn, nil, nil, res.ws)
 		}
 	})
 	hs := &http.Server{

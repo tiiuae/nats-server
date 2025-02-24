@@ -588,7 +588,7 @@ func (s *Server) connectToRemoteLeafNode(remote *leafNodeCfg, firstConnect bool)
 
 		// We have a connection here to a remote server.
 		// Go ahead and create our leaf node and return.
-		s.createLeafNode(conn, rURL, remote, nil, false)
+		s.createLeafNode(conn, rURL, remote, nil)
 
 		// Clear any observer states if we had them.
 		s.clearObserverState(remote)
@@ -819,9 +819,9 @@ func (s *Server) startLeafNodeAcceptLoop() {
 	if warn {
 		s.Warnf(leafnodeTLSInsecureWarning)
 	}
-	go s.acceptConnections(l, "Leafnode", func(conn net.Conn) { s.createLeafNode(conn, nil, nil, nil, false) }, nil)
+	go s.acceptConnections(l, "Leafnode", func(conn net.Conn) { s.createLeafNode(conn, nil, nil, nil) }, nil)
 	if ql != nil {
-		go s.acceptConnections(ql, "QUIC Leafnode", func(conn net.Conn) { s.createLeafNode(conn, nil, nil, nil, true) }, nil)
+		go s.acceptConnections(ql, "QUIC Leafnode", func(conn net.Conn) { s.createLeafNode(conn, nil, nil, nil) }, nil)
 	}
 	s.mu.Unlock()
 }
@@ -987,7 +987,7 @@ func (s *Server) sendAsyncLeafNodeInfo() {
 }
 
 // Called when an inbound leafnode connection is accepted or we create one for a solicited leafnode.
-func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCfg, ws *websocket, quic bool) *client {
+func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCfg, ws *websocket) *client {
 	// Snapshot server options.
 	opts := s.getOpts()
 
@@ -1000,6 +1000,10 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 	now := time.Now().UTC()
 
 	c := &client{srv: s, nc: conn, kind: LEAF, opts: defaultOpts, mpay: maxPay, msubs: maxSubs, start: now, last: now}
+
+	var quic bool
+	_, quic = conn.(*quicConnStream)
+
 	// Do not update the smap here, we need to do it in initLeafNodeSmapAndSendSubs
 	c.leaf = &leaf{}
 
