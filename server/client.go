@@ -253,8 +253,9 @@ type client struct {
 	nc         net.Conn
 
 	*quicConnStream
-	quicParseMu         sync.Mutex
-	quicParseStreamNext bool
+	quicParseMu            sync.Mutex
+	quicParseStreamNext    bool
+	quicDatagramSeqCounter uint64
 
 	ncs     atomic.Value
 	out     outbound
@@ -1517,6 +1518,105 @@ func (c *client) readLoop(pre []byte) {
 	}
 }
 
+func parseFrame(buf []byte) (seqNum, frameNum, frameTotal int, data []byte, err error) {
+	frameHeaderEnd := bytes.IndexByte(buf, ' ')
+	if frameHeaderEnd > 0 {
+		frameHeader := bytes.NewReader(buf[:frameHeaderEnd])
+		_, err := fmt.Fscanf(frameHeader, "%d/%d/%d", &seqNum, &frameNum, &frameTotal)
+		if err != nil {
+			return 0, 0, 0, nil, err
+		}
+		return seqNum, frameNum, frameTotal, buf[frameHeaderEnd+1:], nil
+	}
+	return 0, 0, 0, nil, fmt.Errorf("invalid frame header")
+}
+
+type splitMsg struct {
+	frames  [][]byte
+	present int
+	size    int
+}
+
+type splitMsgManager struct {
+	msgs      map[int]*splitMsg
+	totalSize int
+}
+
+const maxSplitMsgsMemory = 64 * 1024 * 1024
+
+func newSplitMsgManager() *splitMsgManager {
+	return &splitMsgManager{
+		msgs: make(map[int]*splitMsg),
+	}
+}
+
+func (s *splitMsgManager) deleteOldIfNeeded(seqNum int, frameDataSize int) {
+
+	totalMem := s.totalSize + frameDataSize
+
+	if totalMem > maxSplitMsgsMemory {
+
+		for seq, msg := range s.msgs {
+
+			if seq == seqNum {
+				continue
+			}
+
+			delete(s.msgs, seq)
+			s.totalSize -= msg.size
+
+			if s.totalSize+frameDataSize <= maxSplitMsgsMemory {
+				break
+			}
+		}
+	}
+}
+
+func (s *splitMsgManager) ProcessFrame(frame []byte) ([]byte, error) {
+	seqNum, frameNum, frameTotal, frameData, err := parseFrame(frame)
+	if err != nil {
+		return nil, fmt.Errorf("parse datagram frame: %w", err)
+	}
+	if frameTotal == 1 {
+		return frameData, nil
+	}
+
+	s.deleteOldIfNeeded(seqNum, len(frameData))
+
+	msg := s.msgs[seqNum]
+	if msg != nil {
+		if len(msg.frames) != frameTotal {
+
+			s.totalSize -= msg.size
+			delete(s.msgs, seqNum)
+			return nil, fmt.Errorf("received frame with mismatched total %d vs existing %d for sequence %d",
+				frameTotal, len(msg.frames), seqNum)
+		}
+	} else {
+		msg = &splitMsg{
+			frames: make([][]byte, frameTotal),
+			size:   0,
+		}
+		s.msgs[seqNum] = msg
+	}
+
+	msg.frames[frameNum-1] = frameData
+	msg.size += len(frameData)
+	msg.present++
+	s.totalSize += len(frameData)
+
+	if msg.present < frameTotal {
+		return nil, nil
+	}
+
+	fullMsg := bytes.Join(msg.frames, nil)
+
+	s.totalSize -= msg.size
+	delete(s.msgs, seqNum)
+
+	return fullMsg, nil
+}
+
 func (c *client) readDatagramLoop(pre []byte) {
 	// Grab the connection off the client, it will be cleared on a close.
 	// We check for that after the loop, but want to avoid a nil dereference
@@ -1559,6 +1659,8 @@ func (c *client) readDatagramLoop(pre []byte) {
 	var reader io.Reader
 	reader = nc
 
+	splitMsgs := newSplitMsgManager()
+
 	for {
 		var n int
 		var err error
@@ -1581,6 +1683,18 @@ func (c *client) readDatagramLoop(pre []byte) {
 			}
 		}
 		bufs[0] = b[:n]
+		frame := b[:n]
+
+		// c.Debugf("Received datagram: %q", frame[:min(len(frame), 64)])
+		// c.Debugf("Split datagram msgs: %d", len(splitMsgs.msgs))
+		// c.Debugf("Split datagram total size: %d B", splitMsgs.totalSize)
+		fullMsg, err := splitMsgs.ProcessFrame(frame)
+		if fullMsg == nil {
+			if err != nil {
+				c.Errorf("split message error: %v", err)
+			}
+			continue
+		}
 
 		// Check if the account has mappings and if so set the local readcache flag.
 		// We check here to make sure any changes such as config reload are reflected here.
@@ -1601,46 +1715,48 @@ func (c *client) readDatagramLoop(pre []byte) {
 
 		// Main call into parser for inbound data. This will generate callouts
 		// to process messages, etc.
-		for i := 0; i < len(bufs); i++ {
-			c.quicParseMu.Lock()
-			if c.quicParseStreamNext {
-				c.quicParseMu.Unlock()
-				continue
-			}
-			err := c.parse(bufs[i])
-			if state := c.state; state != OP_START {
-				c.quicParseMu.Unlock()
-				err := fmt.Errorf("QUIC datagrams must contain full messages, state %d, buf %s", state, bufs[i])
-				c.Errorf(err.Error())
-				c.closeConnection(closedStateForErr(err))
-				return
-			}
+		// for i := 0; i < len(bufs); i++ {
+		c.quicParseMu.Lock()
+		if c.quicParseStreamNext {
 			c.quicParseMu.Unlock()
-			if err != nil {
-				if err == ErrMinimumVersionRequired {
-					// Special case here, currently only for leaf node connections.
-					// When process the CONNECT protocol, if the minimum version
-					// required was not met, an error was printed and sent back to
-					// the remote, and connection was closed after a certain delay
-					// (to avoid "rapid" reconnection from the remote).
-					// We don't need to do any of the things below, simply return.
-					return
-				}
-				if dur := time.Since(start); dur >= readLoopReportThreshold {
-					c.Warnf("Readloop processing time: %v", dur)
-				}
-				// Need to call flushClients because some of the clients have been
-				// assigned messages and their "fsp" incremented, and need now to be
-				// decremented and their writeLoop signaled.
-				// c.flushClients(0)
-				// handled inline
-				if err != ErrMaxPayload && err != ErrAuthentication {
-					c.Error(err)
-					c.closeConnection(ProtocolViolation)
-				}
+			snip := protoSnippet(0, PROTO_SNIPPET_SIZE, fullMsg)
+			c.Debugf("Dropping QUIC datagram frame due to incomplete stream frame: %s", snip)
+			continue
+		}
+		err = c.parse(fullMsg)
+		if state := c.state; state != OP_START {
+			c.quicParseMu.Unlock()
+			err := fmt.Errorf("QUIC datagrams must contain full messages, state %d, buf %s", state, fullMsg)
+			c.Errorf(err.Error())
+			c.closeConnection(closedStateForErr(err))
+			return
+		}
+		c.quicParseMu.Unlock()
+		if err != nil {
+			if err == ErrMinimumVersionRequired {
+				// Special case here, currently only for leaf node connections.
+				// When process the CONNECT protocol, if the minimum version
+				// required was not met, an error was printed and sent back to
+				// the remote, and connection was closed after a certain delay
+				// (to avoid "rapid" reconnection from the remote).
+				// We don't need to do any of the things below, simply return.
 				return
 			}
+			if dur := time.Since(start); dur >= readLoopReportThreshold {
+				c.Warnf("Readloop processing time: %v", dur)
+			}
+			// Need to call flushClients because some of the clients have been
+			// assigned messages and their "fsp" incremented, and need now to be
+			// decremented and their writeLoop signaled.
+			// c.flushClients(0)
+			// handled inline
+			if err != ErrMaxPayload && err != ErrAuthentication {
+				c.Error(err)
+				c.closeConnection(ProtocolViolation)
+			}
+			return
 		}
+		// }
 
 		// If we are a ROUTER/LEAF and have processed an INFO, it is possible that
 		// we are asked to switch to compression now.
@@ -3837,14 +3953,35 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 		}
 	}
 
+	const maxFrameSize = 1200 // Define the maximum frame size
+
 	var datagramErr error
 	if c.pa.hdr > 0 &&
 		bytes.Equal(getHeader(reliabilityHeader, msg[:c.pa.hdr]), reliabilityUnrealiable) &&
 		client.quicConnStream != nil {
+
 		fullMsg := make([]byte, len(mh)+len(msg))
 		copy(fullMsg, mh)
 		copy(fullMsg[len(mh):], msg)
-		datagramErr = client.quicConnStream.SendDatagram(fullMsg)
+
+		client.quicDatagramSeqCounter++
+
+		numFrames := (len(fullMsg) + maxFrameSize - 1) / maxFrameSize
+		for i := range numFrames {
+			start := i * maxFrameSize
+			end := min(start+maxFrameSize, len(fullMsg))
+			frame := fullMsg[start:end]
+
+			// Add sequence number and total frames to the frame
+			frameHeader := fmt.Sprintf("%d/%d/%d ", client.quicDatagramSeqCounter, i+1, numFrames)
+			frameWithHeader := append([]byte(frameHeader), frame...)
+
+			datagramErr = client.quicConnStream.SendDatagram(frameWithHeader)
+			if datagramErr != nil {
+				client.Debugf("Error sending datagram frame %d/%d: %v", i+1, numFrames, datagramErr)
+				break
+			}
+		}
 	} else {
 		// Queue to outbound buffer
 		client.queueOutbound(mh)
