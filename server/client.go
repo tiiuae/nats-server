@@ -3904,10 +3904,14 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 		return true
 	}
 
+	isDatagramMessage := c.pa.hdr > 0 &&
+		bytes.Equal(getHeader(reliabilityHeader, msg[:c.pa.hdr]), reliabilityUnrealiable) &&
+		client.quicConnStream != nil
+
 	// If we are a client and we detect that the consumer we are
 	// sending to is in a stalled state, go ahead and wait here
 	// with a limit.
-	if c.kind == CLIENT && client.out.stc != nil {
+	if c.kind == CLIENT && client.out.stc != nil && !isDatagramMessage {
 		client.stalledWait(c)
 	}
 
@@ -3956,9 +3960,7 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 	const maxFrameSize = 1200 // Define the maximum frame size
 
 	var datagramErr error
-	if c.pa.hdr > 0 &&
-		bytes.Equal(getHeader(reliabilityHeader, msg[:c.pa.hdr]), reliabilityUnrealiable) &&
-		client.quicConnStream != nil {
+	if isDatagramMessage {
 
 		fullMsg := make([]byte, len(mh)+len(msg))
 		copy(fullMsg, mh)
