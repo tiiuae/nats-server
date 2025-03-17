@@ -25,8 +25,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats-server/v2/internal/fastrand"
-	"github.com/nats-io/nats.go"
+	"github.com/tiiuae/nats-server/v2/internal/fastrand"
+	"github.com/tiiuae/nats.go"
 )
 
 func BenchmarkCoreRequestReply(b *testing.B) {

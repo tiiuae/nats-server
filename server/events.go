@@ -33,8 +33,8 @@ import (
 	"github.com/klauspost/compress/s2"
 
 	"github.com/nats-io/jwt/v2"
-	"github.com/nats-io/nats-server/v2/server/certidp"
-	"github.com/nats-io/nats-server/v2/server/pse"
+	"github.com/tiiuae/nats-server/v2/server/certidp"
+	"github.com/tiiuae/nats-server/v2/server/pse"
 )
 
 const (

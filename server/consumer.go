@@ -28,8 +28,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/nats-io/nats-server/v2/server/avl"
 	"github.com/nats-io/nuid"
+	"github.com/tiiuae/nats-server/v2/server/avl"
 	"golang.org/x/time/rate"
 )
 

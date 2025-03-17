@@ -17,7 +17,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          path: src/github.com/nats-io/nats-server
+          path: src/github.com/tiiuae/nats-server
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -28,7 +28,7 @@ jobs:
         shell: bash --noprofile --norc -x -eo pipefail {0}
         run: |
           set -e
-          cd src/github.com/nats-io/nats-server
+          cd src/github.com/tiiuae/nats-server
           ./scripts/cov.sh upload
           set +e
 
@@ -38,7 +38,7 @@ jobs:
         uses: jandelgado/gcov2lcov-action@69ef3d59a24cc6e062516a73d8be123e85b15cc0
         with:
           infile: acc.out
-          working-directory: src/github.com/nats-io/nats-server
+          working-directory: src/github.com/tiiuae/nats-server
 
       - name: Coveralls
         # Use commit hash here to avoid a re-tagging attack, as this is a third-party action
@@ -46,4 +46,4 @@ jobs:
         uses: coverallsapp/github-action@643bc377ffa44ace6394b2b5d0d3950076de9f63
         with:
           github-token: ${{ secrets.github_token }}
-          file: src/github.com/nats-io/nats-server/coverage.lcov
+          file: src/github.com/tiiuae/nats-server/coverage.lcov
