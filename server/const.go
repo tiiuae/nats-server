@@ -234,4 +234,8 @@ const (
 
 	// DEFAULT_FETCH_TIMEOUT is the default time that the system will wait for an account fetch to return.
 	DEFAULT_ACCOUNT_FETCH_TIMEOUT = 1900 * time.Millisecond
+
+	DEFAULT_MAX_SPLIT_MSG_PAYLOAD_CACHE_SIZE = 64 * 1024 * 1024
+
+	DEFAULT_MAX_SPLIT_MSG_AGE = 2 * time.Minute
 )

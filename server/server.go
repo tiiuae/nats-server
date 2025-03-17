@@ -49,7 +49,7 @@ import (
 	"github.com/nats-io/nkeys"
 	"github.com/nats-io/nuid"
 
-	"github.com/nats-io/nats-server/v2/logger"
+	"github.com/tiiuae/nats-server/v2/logger"
 )
 
 const (
@@ -126,62 +126,64 @@ type Server struct {
 	pinnedAccFail uint64
 	stats
 	scStats
-	mu                  sync.RWMutex
-	reloadMu            sync.RWMutex // Write-locked when a config reload is taking place ONLY
-	kp                  nkeys.KeyPair
-	xkp                 nkeys.KeyPair
-	xpub                string
-	info                Info
-	configFile          string
-	optsMu              sync.RWMutex
-	opts                *Options
-	running             atomic.Bool
-	shutdown            atomic.Bool
-	listener            net.Listener
-	listenerErr         error
-	gacc                *Account
-	sys                 *internal
-	sysAcc              atomic.Pointer[Account]
-	js                  atomic.Pointer[jetStream]
-	isMetaLeader        atomic.Bool
-	jsClustered         atomic.Bool
-	accounts            sync.Map
-	tmpAccounts         sync.Map // Temporarily stores accounts that are being built
-	activeAccounts      int32
-	accResolver         AccountResolver
-	clients             map[uint64]*client
-	routes              map[string][]*client
-	routesPoolSize      int                           // Configured pool size
-	routesReject        bool                          // During reload, we may want to reject adding routes until some conditions are met
-	routesNoPool        int                           // Number of routes that don't use pooling (connecting to older server for instance)
-	accRoutes           map[string]map[string]*client // Key is account name, value is key=remoteID/value=route connection
-	accRouteByHash      sync.Map                      // Key is account name, value is nil or a pool index
-	accAddedCh          chan struct{}
-	accAddedReqID       string
-	leafs               map[uint64]*client
-	users               map[string]*User
-	nkeys               map[string]*NkeyUser
-	totalClients        uint64
-	closed              *closedRingBuffer
-	done                chan bool
-	start               time.Time
-	http                net.Listener
-	httpHandler         http.Handler
-	httpBasePath        string
-	profiler            net.Listener
-	httpReqStats        map[string]uint64
-	routeListener       net.Listener
-	routeListenerErr    error
-	routeInfo           Info
-	routeResolver       netResolver
-	routesToSelf        map[string]struct{}
-	routeTLSName        string
-	leafNodeListener    net.Listener
-	leafNodeListenerErr error
-	leafNodeInfo        Info
-	leafNodeInfoJSON    []byte
-	leafURLsMap         refCountedUrlSet
-	leafNodeOpts        struct {
+	mu                      sync.RWMutex
+	reloadMu                sync.RWMutex // Write-locked when a config reload is taking place ONLY
+	kp                      nkeys.KeyPair
+	xkp                     nkeys.KeyPair
+	xpub                    string
+	info                    Info
+	configFile              string
+	optsMu                  sync.RWMutex
+	opts                    *Options
+	running                 atomic.Bool
+	shutdown                atomic.Bool
+	listener                net.Listener
+	listenerErr             error
+	gacc                    *Account
+	sys                     *internal
+	sysAcc                  atomic.Pointer[Account]
+	js                      atomic.Pointer[jetStream]
+	isMetaLeader            atomic.Bool
+	jsClustered             atomic.Bool
+	accounts                sync.Map
+	tmpAccounts             sync.Map // Temporarily stores accounts that are being built
+	activeAccounts          int32
+	accResolver             AccountResolver
+	clients                 map[uint64]*client
+	routes                  map[string][]*client
+	routesPoolSize          int                           // Configured pool size
+	routesReject            bool                          // During reload, we may want to reject adding routes until some conditions are met
+	routesNoPool            int                           // Number of routes that don't use pooling (connecting to older server for instance)
+	accRoutes               map[string]map[string]*client // Key is account name, value is key=remoteID/value=route connection
+	accRouteByHash          sync.Map                      // Key is account name, value is nil or a pool index
+	accAddedCh              chan struct{}
+	accAddedReqID           string
+	leafs                   map[uint64]*client
+	users                   map[string]*User
+	nkeys                   map[string]*NkeyUser
+	totalClients            uint64
+	closed                  *closedRingBuffer
+	done                    chan bool
+	start                   time.Time
+	http                    net.Listener
+	httpHandler             http.Handler
+	httpBasePath            string
+	profiler                net.Listener
+	httpReqStats            map[string]uint64
+	routeListener           net.Listener
+	routeListenerErr        error
+	routeInfo               Info
+	routeResolver           netResolver
+	routesToSelf            map[string]struct{}
+	routeTLSName            string
+	leafNodeListener        net.Listener
+	leafNodeListenerErr     error
+	leafNodeQUICListener    *quicListener
+	leafNodeQUICListenerErr error
+	leafNodeInfo            Info
+	leafNodeInfoJSON        []byte
+	leafURLsMap             refCountedUrlSet
+	leafNodeOpts            struct {
 		resolver    netResolver
 		dialTimeout time.Duration
 	}
@@ -266,6 +268,8 @@ type Server struct {
 
 	// MQTT structure
 	mqtt srvMQTT
+
+	quic srvQUIC
 
 	// OCSP monitoring
 	ocsps []*OCSPMonitor
@@ -2347,6 +2351,10 @@ func (s *Server) Start() {
 		s.startWebsocketServer()
 	}
 
+	if opts.QUIC.Port != 0 {
+		s.startQUICServer()
+	}
+
 	// Start up listen if we want to accept leaf node connections.
 	if opts.LeafNode.Port != 0 {
 		// Will resolve or assign the advertise address for the leafnode listener.
@@ -2514,6 +2522,18 @@ func (s *Server) Shutdown() {
 		s.leafNodeListener = nil
 	}
 
+	// Kick QUIC client AcceptLoop()
+	if s.quic.listener != nil {
+		doneExpected++
+		s.quic.listener.Close()
+	}
+
+	// Kick QUIC leafnodes AcceptLoop()
+	if s.leafNodeQUICListener != nil {
+		doneExpected++
+		s.leafNodeQUICListener.Close()
+	}
+
 	// Kick route AcceptLoop()
 	if s.routeListener != nil {
 		doneExpected++
@@ -2560,6 +2580,16 @@ func (s *Server) Shutdown() {
 
 	// Wait for go routines to be done.
 	s.grWG.Wait()
+
+	if s.quic.listener != nil {
+		s.quic.listener.CloseTransportAndConn()
+		s.quic.listener = nil
+	}
+
+	if s.leafNodeQUICListener != nil {
+		s.leafNodeQUICListener.CloseTransportAndConn()
+		s.leafNodeQUICListener = nil
+	}
 
 	if opts.PortsFileDir != _EMPTY_ {
 		s.deletePortsFile(opts.PortsFileDir)
@@ -3689,6 +3719,7 @@ func (s *Server) readyForConnections(d time.Duration) error {
 		chk["leafnode"] = info{ok: (opts.LeafNode.Port == 0 || s.leafNodeListener != nil), err: s.leafNodeListenerErr}
 		chk["websocket"] = info{ok: (opts.Websocket.Port == 0 || s.websocket.listener != nil), err: s.websocket.listenerErr}
 		chk["mqtt"] = info{ok: (opts.MQTT.Port == 0 || s.mqtt.listener != nil), err: s.mqtt.listenerErr}
+		chk["quic"] = info{ok: (opts.QUIC.Port == 0 || s.quic.listener != nil), err: s.quic.listenerErr}
 		s.mu.RUnlock()
 
 		var numOK int
@@ -4118,6 +4149,9 @@ func (s *Server) serviceListeners() []net.Listener {
 	}
 	if opts.Websocket.Port != 0 {
 		listeners = append(listeners, s.websocket.listener)
+	}
+	if opts.QUIC.Port != 0 {
+		listeners = append(listeners, s.quic.listener)
 	}
 	return listeners
 }

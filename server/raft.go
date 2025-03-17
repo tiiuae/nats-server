@@ -31,7 +31,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/nats-io/nats-server/v2/internal/fastrand"
+	"github.com/tiiuae/nats-server/v2/internal/fastrand"
 
 	"github.com/minio/highwayhash"
 )

@@ -36,8 +36,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nuid"
+	"github.com/tiiuae/nats.go"
 )
 
 func TestJetStreamClusterWorkQueueStreamDiscardNewDesync(t *testing.T) {

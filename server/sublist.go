@@ -21,7 +21,7 @@ import (
 	"sync/atomic"
 	"unicode/utf8"
 
-	"github.com/nats-io/nats-server/v2/server/stree"
+	"github.com/tiiuae/nats-server/v2/server/stree"
 )
 
 // Sublist is a routing mechanism to handle subject distribution and

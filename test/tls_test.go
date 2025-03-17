@@ -27,9 +27,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
+	"github.com/tiiuae/nats.go"
 
-	"github.com/nats-io/nats-server/v2/server"
+	"github.com/tiiuae/nats-server/v2/server"
 )
 
 var noOpErrHandler = func(_ *nats.Conn, _ *nats.Subscription, _ error) {}

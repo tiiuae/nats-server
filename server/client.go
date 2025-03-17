@@ -15,8 +15,10 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,7 +37,8 @@ import (
 
 	"github.com/klauspost/compress/s2"
 	"github.com/nats-io/jwt/v2"
-	"github.com/nats-io/nats-server/v2/internal/fastrand"
+	"github.com/quic-go/quic-go"
+	"github.com/tiiuae/nats-server/v2/internal/fastrand"
 )
 
 // Type of client connection.
@@ -223,6 +226,10 @@ const (
 	pmrMsgImportedFromService
 )
 
+const reliabilityHeader = "Reliability"
+
+var reliabilityUnrealiable = []byte("unreliable")
+
 type client struct {
 	// Here first because of use of atomics, and memory alignment.
 	stats
@@ -263,6 +270,11 @@ type client struct {
 
 	repliesSincePrune uint16
 	lastReplyPrune    time.Time
+
+	*quicConnStream
+	quicParseMu            sync.Mutex
+	quicParseStreamNext    bool
+	quicDatagramSeqCounter int64
 
 	headers bool
 
@@ -1390,7 +1402,11 @@ func (c *client) readLoop(pre []byte) {
 		// Main call into parser for inbound data. This will generate callouts
 		// to process messages, etc.
 		for i := 0; i < len(bufs); i++ {
-			if err := c.parse(bufs[i]); err != nil {
+			c.quicParseMu.Lock()
+			err := c.parse(bufs[i])
+			c.quicParseStreamNext = c.state != OP_START
+			c.quicParseMu.Unlock()
+			if err != nil {
 				if err == ErrMinimumVersionRequired {
 					// Special case here, currently only for leaf node connections.
 					// When process the CONNECT protocol, if the minimum version
@@ -1499,6 +1515,347 @@ func (c *client) readLoop(pre []byte) {
 
 		if cpacc && (c.in.start.Sub(lpacc)) >= closedSubsCheckInterval {
 			c.pruneClosedSubFromPerAccountCache()
+			lpacc = time.Now()
+		}
+	}
+}
+
+var (
+	errFrameTooSmall     = errors.New("frame too small")
+	errInvalidSeqNum     = errors.New("invalid sequence number")
+	errInvalidFrameTotal = errors.New("invalid frame total")
+	errInvalidFrameIndex = errors.New("invalid frame index")
+)
+
+func parseFrame(buf []byte) (seqNum int64, frameTotal, frameIndex int, data []byte, err error) {
+	if len(buf) < 3 {
+		return 0, 0, 0, nil, errFrameTooSmall
+	}
+
+	seqNumVal, bytesRead := binary.Varint(buf)
+	if bytesRead <= 0 {
+		return 0, 0, 0, nil, errInvalidSeqNum
+	}
+	buf = buf[bytesRead:]
+
+	frameTotalVal, bytesRead := binary.Varint(buf)
+	if bytesRead <= 0 {
+		return 0, 0, 0, nil, errInvalidFrameTotal
+	}
+	buf = buf[bytesRead:]
+
+	frameIndexVal, bytesRead := binary.Varint(buf)
+	if bytesRead <= 0 {
+		return 0, 0, 0, nil, errInvalidFrameIndex
+	}
+
+	return seqNumVal, int(frameTotalVal), int(frameIndexVal), buf[bytesRead:], nil
+}
+
+type splitMsg struct {
+	frames       [][]byte
+	numReceived  int
+	receivedSize int64
+	receivedAt   time.Time
+}
+
+type splitMsgManager struct {
+	msgs      map[int64]*splitMsg
+	seqNums   []int64
+	totalSize int64
+	maxSize   int64
+	maxAge    time.Duration
+}
+
+func newSplitMsgManager(opts *UnreliabilityOpts) *splitMsgManager {
+	return &splitMsgManager{
+		msgs:    make(map[int64]*splitMsg),
+		maxSize: opts.MaxSplitMsgPayloadCacheSize,
+		maxAge:  opts.MaxSplitMsgAge,
+	}
+}
+
+func (s *splitMsgManager) deleteOld(newSeqNum, frameDataSize int64, now time.Time) {
+	for i := 0; len(s.seqNums) > i; {
+		if s.seqNums[i] == newSeqNum {
+			i++
+			continue
+		}
+		msg := s.msgs[s.seqNums[i]]
+		if msg == nil {
+			if i == 0 {
+				s.seqNums = s.seqNums[1:]
+			}
+			continue
+		}
+		if s.totalSize+frameDataSize > s.maxSize || now.Sub(msg.receivedAt) > s.maxAge {
+			s.totalSize -= msg.receivedSize
+			delete(s.msgs, s.seqNums[i])
+			if i == 0 {
+				s.seqNums = s.seqNums[1:]
+			}
+			continue
+		}
+		break
+	}
+}
+
+func (s *splitMsgManager) ProcessFrame(frame []byte) ([]byte, error) {
+	seqNum, frameTotal, frameIndex, frameData, err := parseFrame(frame)
+	if err != nil {
+		return nil, fmt.Errorf("parse datagram frame: %w", err)
+	}
+
+	now := time.Now()
+	s.deleteOld(seqNum, int64(len(frameData)), now)
+
+	if frameTotal == 1 {
+		return frameData, nil
+	}
+
+	msg := s.msgs[seqNum]
+	if msg != nil {
+		if len(msg.frames) != frameTotal {
+			s.totalSize -= msg.receivedSize
+			delete(s.msgs, seqNum)
+			return nil, fmt.Errorf("received frame with mismatched total %d vs existing %d for sequence %d",
+				frameTotal, len(msg.frames), seqNum)
+		}
+	} else {
+		msg = &splitMsg{
+			frames:     make([][]byte, frameTotal),
+			receivedAt: now,
+		}
+		s.msgs[seqNum] = msg
+		s.seqNums = append(s.seqNums, seqNum)
+	}
+
+	msg.frames[frameIndex] = frameData
+	msg.receivedSize += int64(len(frameData))
+	msg.numReceived++
+	s.totalSize += int64(len(frameData))
+
+	if msg.numReceived < frameTotal {
+		return nil, nil
+	}
+
+	fullMsg := bytes.Join(msg.frames, nil)
+
+	s.totalSize -= msg.receivedSize
+	delete(s.msgs, seqNum)
+
+	return fullMsg, nil
+}
+
+func (c *client) readDatagramLoop(pre []byte, unreliabilityOpts UnreliabilityOpts) {
+	// Grab the connection off the client, it will be cleared on a close.
+	// We check for that after the loop, but want to avoid a nil dereference
+	c.mu.Lock()
+	s := c.srv
+	defer s.grWG.Done()
+	if c.isClosed() {
+		c.mu.Unlock()
+		return
+	}
+	nc := c.nc
+	bufSize := startBufSize
+
+	// Check the per-account-cache for closed subscriptions
+	cpacc := c.kind == ROUTER || c.kind == GATEWAY
+	// Last per-account-cache check for closed subscriptions
+	lpacc := time.Now()
+	acc := c.acc
+	// checkCompress := c.kind == ROUTER || c.kind == LEAF
+	c.mu.Unlock()
+
+	qcs, ok := nc.(*quicConnStream)
+	if !ok {
+		c.Errorf("readDatagramLoop requires nc to be a *quicConnStream, found %T", nc)
+		c.closeConnection(ClientClosed)
+		return
+	}
+
+	// Start read buffer.
+	b := make([]byte, bufSize)
+
+	// Websocket clients will return several slices if there are multiple
+	// websocket frames in the blind read. For non WS clients though, we
+	// will always have 1 slice per loop iteration. So we define this here
+	// so non WS clients will use bufs[0] = b[:n].
+	var _bufs [1][]byte
+	bufs := _bufs[:1]
+
+	var decompress bool
+	var reader io.Reader
+	reader = nc
+
+	splitMsgs := newSplitMsgManager(&unreliabilityOpts)
+
+	for {
+		var n int
+		var err error
+
+		// If we have a pre buffer parse that first.
+		if len(pre) > 0 {
+			b = pre
+			n = len(pre)
+			pre = nil
+		} else {
+			b, err = qcs.ReceiveDatagram(context.Background())
+			n = len(b)
+			if err != nil {
+				var appErr *quic.ApplicationError
+				if errors.As(err, &appErr) && appErr.ErrorCode != 0 {
+					c.Errorf("read error: %v", err)
+				}
+				c.closeConnection(closedStateForErr(err))
+				return
+			}
+		}
+		bufs[0] = b[:n]
+		frame := b[:n]
+
+		// c.Debugf("Received datagram: %q", frame[:min(len(frame), 64)])
+		// c.Debugf("Split datagram msgs: %d", len(splitMsgs.msgs))
+		// c.Debugf("Split datagram total size: %d B", splitMsgs.totalSize)
+		fullMsg, err := splitMsgs.ProcessFrame(frame)
+		if fullMsg == nil {
+			if err != nil {
+				c.Errorf("split message error: %v", err)
+			}
+			continue
+		}
+
+		// Check if the account has mappings and if so set the local readcache flag.
+		// We check here to make sure any changes such as config reload are reflected here.
+		// if c.kind == CLIENT || c.kind == LEAF {
+		// 	if acc.hasMappings() {
+		// 		c.in.flags.set(hasMappings)
+		// 	} else {
+		// 		c.in.flags.clear(hasMappings)
+		// 	}
+		// }
+
+		start := time.Now()
+
+		// Clear inbound stats cache
+		msgs := 0
+		bytes := 0
+		subs := 0
+
+		// Main call into parser for inbound data. This will generate callouts
+		// to process messages, etc.
+		// for i := 0; i < len(bufs); i++ {
+		c.quicParseMu.Lock()
+		if c.quicParseStreamNext {
+			c.quicParseMu.Unlock()
+			snip := protoSnippet(0, PROTO_SNIPPET_SIZE, fullMsg)
+			c.Debugf("Dropping QUIC datagram frame due to incomplete stream frame: %s", snip)
+			continue
+		}
+		err = c.parse(fullMsg)
+		if state := c.state; state != OP_START {
+			c.quicParseMu.Unlock()
+			err := fmt.Errorf("QUIC datagrams must contain full messages, state %d, buf %s", state, fullMsg)
+			c.Errorf(err.Error())
+			c.closeConnection(closedStateForErr(err))
+			return
+		}
+		c.quicParseMu.Unlock()
+		if err != nil {
+			if err == ErrMinimumVersionRequired {
+				// Special case here, currently only for leaf node connections.
+				// When process the CONNECT protocol, if the minimum version
+				// required was not met, an error was printed and sent back to
+				// the remote, and connection was closed after a certain delay
+				// (to avoid "rapid" reconnection from the remote).
+				// We don't need to do any of the things below, simply return.
+				return
+			}
+			if dur := time.Since(start); dur >= readLoopReportThreshold {
+				c.Warnf("Readloop processing time: %v", dur)
+			}
+			// Need to call flushClients because some of the clients have been
+			// assigned messages and their "fsp" incremented, and need now to be
+			// decremented and their writeLoop signaled.
+			// c.flushClients(0)
+			// handled inline
+			if err != ErrMaxPayload && err != ErrAuthentication {
+				c.Error(err)
+				c.closeConnection(ProtocolViolation)
+			}
+			return
+		}
+		// }
+
+		// If we are a ROUTER/LEAF and have processed an INFO, it is possible that
+		// we are asked to switch to compression now.
+		// if checkCompress && c.in.flags.isSet(switchToCompression) {
+		// 	c.in.flags.clear(switchToCompression)
+		// 	// For now we support only s2 compression...
+		// 	reader = s2.NewReader(nc)
+		// 	decompress = true
+		// }
+
+		// Updates stats for client and server that were collected
+		// from parsing through the buffer.
+		if msgs > 0 {
+			atomic.AddInt64(&c.inMsgs, int64(msgs))
+			atomic.AddInt64(&c.inBytes, int64(bytes))
+			if acc != nil {
+				atomic.AddInt64(&acc.inMsgs, int64(msgs))
+				atomic.AddInt64(&acc.inBytes, int64(bytes))
+			}
+			atomic.AddInt64(&s.inMsgs, int64(msgs))
+			atomic.AddInt64(&s.inBytes, int64(bytes))
+		}
+
+		// Signal to writeLoop to flush to socket.
+		// last := c.flushClients(0)
+		last := time.Now()
+
+		// Update activity, check read buffer size.
+		c.mu.Lock()
+
+		// Activity based on interest changes or data/msgs.
+		// Also update last receive activity for ping sender
+		if msgs > 0 || subs > 0 {
+			c.last = last
+			c.lastIn = last
+		}
+
+		// re-snapshot the account since it can change during reload, etc.
+		acc = c.acc
+		// Refresh nc because in some cases, we have upgraded c.nc to TLS.
+		if nc != c.nc {
+			nc = c.nc
+			if decompress && nc != nil {
+				// For now we support only s2 compression...
+				reader.(*s2.Reader).Reset(nc)
+			} else if !decompress {
+				reader = nc
+			}
+		}
+		c.mu.Unlock()
+
+		// Connection was closed
+		if nc == nil {
+			return
+		}
+
+		if dur := time.Since(start); dur >= readLoopReportThreshold {
+			c.Warnf("Datagram readloop processing time: %v", dur)
+		}
+
+		// We could have had a read error from above but still read some data.
+		// If so do the close here unconditionally.
+		if err != nil {
+			c.closeConnection(closedStateForErr(err))
+			return
+		}
+
+		if cpacc && (start.Sub(lpacc)) >= closedSubsCheckInterval {
+			// c.pruneClosedSubFromPerAccountCache()
 			lpacc = time.Now()
 		}
 	}
@@ -3478,10 +3835,15 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 		return true
 	}
 
+	isDatagramMessage := c.pa.hdr > 0 &&
+		c.pa.hdr < len(msg) &&
+		bytes.Equal(getHeader(reliabilityHeader, msg[:c.pa.hdr]), reliabilityUnrealiable) &&
+		client.quicConnStream != nil
+
 	// If we are a client and we detect that the consumer we are
 	// sending to is in a stalled state, go ahead and wait here
 	// with a limit.
-	if c.kind == CLIENT && client.out.stc != nil {
+	if c.kind == CLIENT && client.out.stc != nil && !isDatagramMessage {
 		client.stalledWait(c)
 	}
 
@@ -3520,12 +3882,64 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 		}
 	}
 
-	// Queue to outbound buffer
-	client.queueOutbound(mh)
-	client.queueOutbound(msg)
-	if prodIsMQTT {
-		// Need to add CR_LF since MQTT producers don't send CR_LF
-		client.queueOutbound([]byte(CR_LF))
+	const maxFrameSize = 1200 // Define the maximum frame size
+
+	var datagramErr error
+	if isDatagramMessage {
+		client.quicDatagramSeqCounter++
+
+		fullMsgLen := len(mh) + len(msg)
+
+		frameBuf := make([]byte, maxFrameSize)
+
+		seqNumSize := binary.PutVarint(frameBuf[0:], client.quicDatagramSeqCounter)
+
+		estimatedHeaderSize := seqNumSize + 2*binary.MaxVarintLen64
+		maxPayloadSize := maxFrameSize - estimatedHeaderSize
+		frameCount := (fullMsgLen + maxPayloadSize - 1) / maxPayloadSize
+
+		frameIndexPos := seqNumSize + binary.PutVarint(frameBuf[seqNumSize:], int64(frameCount))
+
+		for frameIndex := range frameCount {
+			payloadPos := frameIndexPos + binary.PutVarint(frameBuf[frameIndexPos:], int64(frameIndex))
+
+			start := frameIndex * maxPayloadSize
+			end := min(start+maxPayloadSize, fullMsgLen)
+
+			frameEnd := payloadPos
+
+			// Copy from mh first
+			if start < len(mh) {
+				copyEnd := min(end, len(mh))
+				frameEnd += copy(frameBuf[payloadPos:], mh[start:copyEnd])
+
+				// If the frame can fit more data, copy from msg
+				if copyEnd < end {
+					msgStart := copyEnd - len(mh)
+					msgEnd := end - len(mh)
+					frameEnd += copy(frameBuf[frameEnd:], msg[msgStart:msgEnd])
+				}
+			} else {
+				// We're past the header, copy only from msg
+				msgStart := start - len(mh)
+				msgEnd := end - len(mh)
+				frameEnd += copy(frameBuf[payloadPos:], msg[msgStart:msgEnd])
+			}
+
+			datagramErr = client.quicConnStream.SendDatagram(frameBuf[:frameEnd])
+			if datagramErr != nil {
+				client.Debugf("Error sending datagram frame %d/%d/%d: %v", client.quicDatagramSeqCounter, frameCount, frameIndex, datagramErr)
+				break
+			}
+		}
+	} else {
+		// Queue to outbound buffer
+		client.queueOutbound(mh)
+		client.queueOutbound(msg)
+		if prodIsMQTT {
+			// Need to add CR_LF since MQTT producers don't send CR_LF
+			client.queueOutbound([]byte(CR_LF))
+		}
 	}
 
 	// If we are tracking dynamic publish permissions that track reply subjects,
