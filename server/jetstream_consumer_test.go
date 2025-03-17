@@ -36,10 +36,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go/jetstream"
+	"github.com/tiiuae/nats.go/jetstream"
 
-	"github.com/nats-io/nats.go"
+	"github.com/tiiuae/nats.go"
 	"github.com/nats-io/nuid"
+	"github.com/tiiuae/nats.go"
 )
 
 func TestJetStreamConsumerMultipleFiltersRemoveFilters(t *testing.T) {

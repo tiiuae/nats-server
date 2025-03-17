@@ -225,8 +225,10 @@ type Server struct {
 	routeResolver       netResolver
 	routesToSelf        map[string]struct{}
 	routeTLSName        string
-	leafNodeListener    net.Listener
-	leafNodeListenerErr error
+	leafNodeListener         net.Listener
+	leafNodeListenerErr      error
+	leafNodeQUICListener     *quicListener
+	leafNodeQUICListenerErr  error
 	leafNodeInfo        Info
 	leafNodeInfoJSON    []byte
 	leafURLsMap         refCountedUrlSet
@@ -314,6 +316,8 @@ type Server struct {
 
 	// MQTT structure
 	mqtt srvMQTT
+
+	quic srvQUIC
 
 	// OCSP monitoring
 	ocsps []*OCSPMonitor
@@ -2517,6 +2521,10 @@ func (s *Server) Start() {
 		s.startWebsocketServer()
 	}
 
+	if opts.QUIC.Port != 0 {
+		s.startQUICServer()
+	}
+
 	// Start up listen if we want to accept leaf node connections.
 	if opts.LeafNode.Port != 0 {
 		// Will resolve or assign the advertise address for the leafnode listener.
@@ -2681,6 +2689,18 @@ func (s *Server) Shutdown() {
 		s.leafNodeListener = nil
 	}
 
+	// Kick QUIC client AcceptLoop()
+	if s.quic.listener != nil {
+		doneExpected++
+		s.quic.listener.Close()
+	}
+
+	// Kick QUIC leafnodes AcceptLoop()
+	if s.leafNodeQUICListener != nil {
+		doneExpected++
+		s.leafNodeQUICListener.Close()
+	}
+
 	// Kick route AcceptLoop()
 	if s.routeListener != nil {
 		doneExpected++
@@ -2727,6 +2747,16 @@ func (s *Server) Shutdown() {
 
 	// Wait for go routines to be done.
 	s.grWG.Wait()
+
+	if s.quic.listener != nil {
+		s.quic.listener.CloseTransportAndConn()
+		s.quic.listener = nil
+	}
+
+	if s.leafNodeQUICListener != nil {
+		s.leafNodeQUICListener.CloseTransportAndConn()
+		s.leafNodeQUICListener = nil
+	}
 
 	if opts.PortsFileDir != _EMPTY_ {
 		s.deletePortsFile(opts.PortsFileDir)
@@ -3972,6 +4002,7 @@ func (s *Server) readyForConnections(d time.Duration) error {
 		chk["leafnode"] = info{ok: (opts.LeafNode.Port == 0 || s.leafNodeListener != nil), err: s.leafNodeListenerErr}
 		chk["websocket"] = info{ok: (opts.Websocket.Port == 0 || s.websocket.listener != nil), err: s.websocket.listenerErr}
 		chk["mqtt"] = info{ok: (opts.MQTT.Port == 0 || s.mqtt.listener != nil), err: s.mqtt.listenerErr}
+		chk["quic"] = info{ok: (opts.QUIC.Port == 0 || s.quic.listener != nil), err: s.quic.listenerErr}
 		s.mu.RUnlock()
 
 		var numOK int
@@ -4401,6 +4432,9 @@ func (s *Server) serviceListeners() []net.Listener {
 	}
 	if opts.Websocket.Port != 0 {
 		listeners = append(listeners, s.websocket.listener)
+	}
+	if opts.QUIC.Port != 0 {
+		listeners = append(listeners, s.quic.listener)
 	}
 	return listeners
 }

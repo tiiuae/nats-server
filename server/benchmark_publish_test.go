@@ -19,7 +19,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/nats-io/nats.go"
+	"github.com/tiiuae/nats.go"
 )
 
 func BenchmarkPublish(b *testing.B) {

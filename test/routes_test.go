@@ -27,7 +27,7 @@ import (
 
 	"github.com/tiiuae/nats-server/v2/internal/testhelper"
 	"github.com/tiiuae/nats-server/v2/server"
-	"github.com/nats-io/nats.go"
+	"github.com/tiiuae/nats.go"
 )
 
 const clientProtoInfo = 1
