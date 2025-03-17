@@ -34,10 +34,11 @@ import (
 	"time"
 
 	"github.com/nats-io/jwt/v2"
-	"github.com/nats-io/nats-server/v2/conf"
-	"github.com/nats-io/nats-server/v2/server/certidp"
-	"github.com/nats-io/nats-server/v2/server/certstore"
 	"github.com/nats-io/nkeys"
+	"github.com/quic-go/quic-go"
+	"github.com/tiiuae/nats-server/v2/conf"
+	"github.com/tiiuae/nats-server/v2/server/certidp"
+	"github.com/tiiuae/nats-server/v2/server/certstore"
 )
 
 var allowUnknownTopLevelField = int32(0)
@@ -143,6 +144,11 @@ type RemoteGatewayOpts struct {
 	tlsConfigOpts *TLSConfigOpts
 }
 
+type UnreliabilityOpts struct {
+	MaxSplitMsgAge              time.Duration `json:"max_split_msg_age,omitempty"`
+	MaxSplitMsgPayloadCacheSize int64         `json:"max_split_msg_cache_size,omitempty"`
+}
+
 // LeafNodeOpts are options for a given server to accept leaf node connections and/or connect to a remote cluster.
 type LeafNodeOpts struct {
 	Host              string        `json:"addr,omitempty"`
@@ -161,6 +167,10 @@ type LeafNodeOpts struct {
 	Advertise         string        `json:"-"`
 	NoAdvertise       bool          `json:"-"`
 	ReconnectInterval time.Duration `json:"-"`
+
+	EnableQUIC bool `json:"-"`
+
+	Unreliability UnreliabilityOpts `json:"-"`
 
 	// Compression options
 	Compression CompressionOpts `json:"-"`
@@ -311,6 +321,8 @@ type Options struct {
 	JsAccDefaultDomain         map[string]string `json:"-"` // account to domain name mapping
 	Websocket                  WebsocketOpts     `json:"-"`
 	MQTT                       MQTTOpts          `json:"-"`
+	QUIC                       QUICOpts          `json:"-"`
+	Unreliability              UnreliabilityOpts `json:"-"`
 	ProfPort                   int               `json:"-"`
 	ProfBlockRate              int               `json:"-"`
 	PidFile                    string            `json:"-"`
@@ -575,6 +587,21 @@ type MQTTOpts struct {
 	// downgradeQOS2Sub tells the MQTT client to downgrade QoS2 SUBSCRIBE
 	// requests to QoS1.
 	downgradeQoS2Sub bool
+}
+
+type QUICOpts struct {
+	Host string
+	Port int
+
+	Advertise string
+
+	TLSConfig *tls.Config
+
+	QUICConfig           *quic.Config
+	HandshakeIdleTimeout time.Duration
+	MaxIdleTimeout       time.Duration
+
+	tlsConfigOpts *TLSConfigOpts
 }
 
 type netResolver interface {
@@ -1502,6 +1529,17 @@ func (o *Options) processConfigFileLine(k string, v any, errors *[]error, warnin
 			*errors = append(*errors, err)
 			return
 		}
+	case "quic":
+		if err := parseQUIC(tk, o, errors, warnings); err != nil {
+			*errors = append(*errors, err)
+			return
+		}
+	case "unreliability":
+		_, mv := unwrapValue(v, &lt)
+		if err := parseUnreliability(&o.Unreliability, mv, errors, warnings); err != nil {
+			*errors = append(*errors, err)
+			return
+		}
 	case "server_tags":
 		var err error
 		switch v := v.(type) {
@@ -2320,6 +2358,13 @@ func parseLeafNodes(v any, opts *Options, errors *[]error, warnings *[]error) er
 			opts.LeafNode.Remotes = remotes
 		case "reconnect", "reconnect_delay", "reconnect_interval":
 			opts.LeafNode.ReconnectInterval = parseDuration("reconnect", tk, mv, errors, warnings)
+		case "enable_quic":
+			opts.LeafNode.EnableQUIC = mv.(bool)
+		case "unreliability":
+			if err := parseUnreliability(&opts.LeafNode.Unreliability, mv, errors, warnings); err != nil {
+				*errors = append(*errors, err)
+				continue
+			}
 		case "tls":
 			tc, err := parseTLS(tk, true)
 			if err != nil {
@@ -4817,6 +4862,133 @@ func parseMQTT(v any, o *Options, errors *[]error, warnings *[]error) error {
 	return nil
 }
 
+func setUnreliabilityDefaults(opts *UnreliabilityOpts) {
+	if opts.MaxSplitMsgAge == 0 {
+		opts.MaxSplitMsgAge = DEFAULT_MAX_SPLIT_MSG_AGE
+	}
+	if opts.MaxSplitMsgPayloadCacheSize == 0 {
+		opts.MaxSplitMsgPayloadCacheSize = DEFAULT_MAX_SPLIT_MSG_PAYLOAD_CACHE_SIZE
+	}
+}
+
+func parseUnreliability(opts *UnreliabilityOpts, v any, errors *[]error, warnings *[]error) error {
+	var lt token
+	defer convertPanicToErrorList(&lt, errors)
+	tk, v := unwrapValue(v, &lt)
+	gm, ok := v.(map[string]any)
+	if !ok {
+		return &configErr{tk, fmt.Sprintf("Expected unreliability field to be a map, got %T", v)}
+	}
+	opts.MaxSplitMsgPayloadCacheSize = DEFAULT_MAX_SPLIT_MSG_PAYLOAD_CACHE_SIZE
+	opts.MaxSplitMsgAge = DEFAULT_MAX_SPLIT_MSG_AGE
+	for mk, mv := range gm {
+		tk, mv = unwrapValue(mv, &lt)
+		switch strings.ToLower(mk) {
+		case "max_split_msg_age":
+			opts.MaxSplitMsgAge = parseDuration("max_split_msg_age", tk, mv, errors, warnings)
+		case "max_split_msg_cache_size":
+			opts.MaxSplitMsgPayloadCacheSize = mv.(int64)
+		}
+	}
+	return nil
+}
+
+func parseQUIC(v interface{}, o *Options, errors *[]error, warnings *[]error) error {
+	var lt token
+	defer convertPanicToErrorList(&lt, errors)
+
+	tk, v := unwrapValue(v, &lt)
+	gm, ok := v.(map[string]interface{})
+	if !ok {
+		return &configErr{tk, fmt.Sprintf("Expected QUIC to be a map, got %T", v)}
+	}
+	for mk, mv := range gm {
+		// Again, unwrap token value if line check is required.
+		tk, mv = unwrapValue(mv, &lt)
+		switch strings.ToLower(mk) {
+		case "listen":
+			hp, err := parseListen(mv)
+			if err != nil {
+				err := &configErr{tk, err.Error()}
+				*errors = append(*errors, err)
+				continue
+			}
+			o.QUIC.Host = hp.host
+			o.QUIC.Port = hp.port
+		case "port":
+			o.QUIC.Port = int(mv.(int64))
+		case "host", "net":
+			o.QUIC.Host = mv.(string)
+		case "advertise":
+			o.QUIC.Advertise = mv.(string)
+		case "tls":
+			tc, err := parseTLS(tk, true)
+			if err != nil {
+				*errors = append(*errors, err)
+				continue
+			}
+			if o.QUIC.TLSConfig, err = GenTLSConfig(tc); err != nil {
+				err := &configErr{tk, err.Error()}
+				*errors = append(*errors, err)
+				continue
+			}
+			o.QUIC.tlsConfigOpts = tc
+		case "handshake_idle_timeout":
+			ht := time.Duration(0)
+			switch mv := mv.(type) {
+			case int64:
+				ht = time.Duration(mv) * time.Second
+			case string:
+				var err error
+				ht, err = time.ParseDuration(mv)
+				if err != nil {
+					err := &configErr{tk, err.Error()}
+					*errors = append(*errors, err)
+					continue
+				}
+			default:
+				err := &configErr{tk, fmt.Sprintf("error parsing handshake idle timeout: unsupported type %T", mv)}
+				*errors = append(*errors, err)
+			}
+			o.QUIC.HandshakeIdleTimeout = ht
+		case "max_idle_timeout":
+			it := time.Duration(0)
+			switch mv := mv.(type) {
+			case int64:
+				it = time.Duration(mv) * time.Second
+			case string:
+				var err error
+				it, err = time.ParseDuration(mv)
+				if err != nil {
+					err := &configErr{tk, err.Error()}
+					*errors = append(*errors, err)
+					continue
+				}
+			default:
+				err := &configErr{tk, fmt.Sprintf("error parsing max idle timeout: unsupported type %T", mv)}
+				*errors = append(*errors, err)
+			}
+			o.QUIC.MaxIdleTimeout = it
+		default:
+			if !tk.IsUsedVariable() {
+				err := &unknownConfigFieldErr{
+					field: mk,
+					configErr: configErr{
+						token: tk,
+					},
+				}
+				*errors = append(*errors, err)
+				continue
+			}
+		}
+	}
+	o.QUIC.QUICConfig = defaultQUICConfig.Clone()
+	o.QUIC.QUICConfig.HandshakeIdleTimeout = o.QUIC.HandshakeIdleTimeout
+	o.QUIC.QUICConfig.KeepAlivePeriod = 10 * time.Second
+	o.QUIC.QUICConfig.MaxIdleTimeout = o.QUIC.MaxIdleTimeout
+	return nil
+}
+
 // GenTLSConfig loads TLS related configuration parameters.
 func GenTLSConfig(tc *TLSConfigOpts) (*tls.Config, error) {
 	// Create the tls.Config from our options before including the certs.
@@ -5158,6 +5330,8 @@ func setBaselineOptions(opts *Options) {
 			}
 		}
 	}
+	setUnreliabilityDefaults(&opts.Unreliability)
+	setUnreliabilityDefaults(&opts.LeafNode.Unreliability)
 	if opts.LeafNode.Port != 0 {
 		if opts.LeafNode.Host == _EMPTY_ {
 			opts.LeafNode.Host = DEFAULT_HOST
@@ -5250,6 +5424,11 @@ func setBaselineOptions(opts *Options) {
 		}
 		if opts.MQTT.TLSTimeout == 0 {
 			opts.MQTT.TLSTimeout = float64(TLS_TIMEOUT) / float64(time.Second)
+		}
+	}
+	if opts.QUIC.Port != 0 {
+		if opts.QUIC.Host == _EMPTY_ {
+			opts.QUIC.Host = DEFAULT_HOST
 		}
 	}
 	// JetStream

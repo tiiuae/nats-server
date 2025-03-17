@@ -535,8 +535,16 @@ func (s *Server) connectToRemoteLeafNode(remote *leafNodeCfg, firstConnect bool)
 				s.Debugf("Will not attempt to connect to remote server on %q%s, leafnodes currently disabled", rURL.Host, ipStr)
 				err = ErrLeafNodeDisabled
 			} else {
-				s.Debugf("Trying to connect as leafnode to remote server on %q%s", rURL.Host, ipStr)
-				conn, err = natsDialTimeout("tcp", url, dialTimeout)
+				if isQUICURL(rURL) {
+					s.Debugf("Trying to connect as leafnode to remote server on %q%s using QUIC", rURL.Host, ipStr)
+					conn, err = (&quicDialer{
+						tlsConfig:  makeLeafQUICTLSConfig(remote),
+						quicConfig: makeLeafQUICConfig(&opts.QUIC, dialTimeout),
+					}).Dial("udp", url)
+				} else {
+					s.Debugf("Trying to connect as leafnode to remote server on %q%s", rURL.Host, ipStr)
+					conn, err = natsDialTimeout("tcp", url, dialTimeout)
+				}
 			}
 		}
 		if err != nil {
@@ -711,6 +719,23 @@ func (s *Server) startLeafNodeAcceptLoop() {
 	s.Noticef("Listening for leafnode connections on %s",
 		net.JoinHostPort(opts.LeafNode.Host, strconv.Itoa(l.Addr().(*net.TCPAddr).Port)))
 
+	var ql *quicListener
+	if opts.LeafNode.EnableQUIC {
+		var qe error
+		qhp := net.JoinHostPort(opts.LeafNode.Host, strconv.Itoa(l.Addr().(*net.TCPAddr).Port))
+		// TODO: Add separate QUIC config for leaf nodes
+		ql, qe = s.quicListen(qhp, opts.LeafNode.TLSConfig, &opts.QUIC)
+		s.leafNodeQUICListenerErr = qe
+		if qe != nil {
+			s.mu.Unlock()
+			s.Fatalf("Error listening on leafnode port: %d - %v", opts.LeafNode.Port, qe)
+			return
+		}
+
+		s.Noticef("Listening for QUIC leafnode connections on %s",
+			net.JoinHostPort(opts.LeafNode.Host, strconv.Itoa(ql.Addr().(*net.TCPAddr).Port)))
+	}
+
 	tlsRequired := opts.LeafNode.TLSConfig != nil
 	tlsVerify := tlsRequired && opts.LeafNode.TLSConfig.ClientAuth == tls.RequireAndVerifyClientCert
 	// Do not set compression in this Info object, it would possibly cause
@@ -750,6 +775,9 @@ func (s *Server) startLeafNodeAcceptLoop() {
 
 	// Setup state that can enable shutdown
 	s.leafNodeListener = l
+	if ql != nil {
+		s.leafNodeQUICListener = ql
+	}
 
 	// As of now, a server that does not have remotes configured would
 	// never solicit a connection, so we should not have to warn if
@@ -770,6 +798,9 @@ func (s *Server) startLeafNodeAcceptLoop() {
 		s.Warnf(leafnodeTLSInsecureWarning)
 	}
 	go s.acceptConnections(l, "Leafnode", func(conn net.Conn) { s.createLeafNode(conn, nil, nil, nil) }, nil)
+	if ql != nil {
+		go s.acceptConnections(ql, "QUIC Leafnode", func(conn net.Conn) { s.createLeafNode(conn, nil, nil, nil) }, nil)
+	}
 	s.mu.Unlock()
 }
 
@@ -946,6 +977,10 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 	now := time.Now().UTC()
 
 	c := &client{srv: s, nc: conn, kind: LEAF, opts: defaultOpts, mpay: maxPay, msubs: maxSubs, start: now, last: now}
+
+	var quic bool
+	c.quicConnStream, quic = conn.(*quicConnStream)
+
 	// Do not update the smap here, we need to do it in initLeafNodeSmapAndSendSubs
 	c.leaf = &leaf{}
 
@@ -996,7 +1031,7 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 		if !c.leaf.remote.Hub {
 			c.leaf.isSpoke = true
 		}
-		tlsFirst = remote.TLSHandshakeFirst
+		tlsFirst = !quic && remote.TLSHandshakeFirst
 		remote.Unlock()
 		c.acc = acc
 	} else {
@@ -1004,6 +1039,7 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 		if ws != nil {
 			c.Debugf("Leafnode compression=%v", c.ws.compress)
 		}
+		tlsFirst = !quic && opts.LeafNode.TLSHandshakeFirst
 	}
 	c.mu.Unlock()
 
@@ -1083,7 +1119,7 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 		}
 
 		// Check to see if we need to spin up TLS.
-		if !c.isWebsocket() && info.TLSRequired {
+		if !quic && !c.isWebsocket() && info.TLSRequired {
 			// Perform server-side TLS handshake.
 			if err := c.doTLSServerHandshake(tlsHandshakeLeaf, opts.LeafNode.TLSConfig, opts.LeafNode.TLSTimeout, opts.LeafNode.TLSPinnedCerts); err != nil {
 				c.mu.Unlock()
@@ -1131,6 +1167,10 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 	// Spin up the read loop.
 	s.startGoRoutine(func() { c.readLoop(preBuf) })
 
+	if quic {
+		s.startGoRoutine(func() { c.readDatagramLoop(nil, opts.LeafNode.Unreliability) })
+	}
+
 	// We will spin the write loop for solicited connections only
 	// when processing the INFO and after switching to TLS if needed.
 	if !solicited {
@@ -1148,7 +1188,7 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 // Lock held on entry.
 func (c *client) leafClientHandshakeIfNeeded(remote *leafNodeCfg, opts *Options) (bool, error) {
 	// Check if TLS is required and gather TLS config variables.
-	tlsRequired, tlsConfig, tlsName, tlsTimeout := c.leafNodeGetTLSConfigForSolicit(remote)
+	tlsRequired, tlsConfig, tlsName, tlsTimeout := leafNodeGetTLSConfigForSolicit(remote)
 	if !tlsRequired {
 		return false, nil
 	}
@@ -1182,10 +1222,15 @@ func (c *client) processLeafnodeInfo(info *Info) {
 	didSolicit := remote != nil
 	firstINFO := !c.flags.isSet(infoReceived)
 
-	// In case of websocket, the TLS handshake has been already done.
+	// In case of QUIC and websocket, the TLS handshake has been already done.
 	// So check only for non websocket connections and for configurations
 	// where the TLS Handshake was not done first.
-	if didSolicit && !c.flags.isSet(handshakeComplete) && !c.isWebsocket() && !remote.TLSHandshakeFirst {
+	if didSolicit &&
+		!c.flags.isSet(handshakeComplete) &&
+		!isQUICURL(remote.getCurrentURL()) &&
+		!c.isWebsocket() &&
+		!remote.TLSHandshakeFirst {
+
 		// If the server requires TLS, we need to set this in the remote
 		// otherwise if there is no TLS configuration block for the remote,
 		// the solicit side will not attempt to perform the TLS handshake.
@@ -1448,6 +1493,10 @@ func (c *client) updateLeafNodeURLs(info *Info) {
 			proto = wsSchemePrefixTLS
 		}
 		c.doUpdateLNURLs(cfg, proto, info.WSConnectURLs)
+		return
+	}
+	if len(cfg.URLs) > 0 && isQUICURL(cfg.URLs[0]) {
+		c.doUpdateLNURLs(cfg, "quic-leaf", info.LeafNodeURLs)
 		return
 	}
 	c.doUpdateLNURLs(cfg, "nats-leaf", info.LeafNodeURLs)
@@ -2844,7 +2893,7 @@ func (c *client) setLeafConnectDelayIfSoliciting(delay time.Duration) (string, t
 // if TLS is required, and if so, will return a clone of the TLS Config
 // (since some fields will be changed during handshake), the TLS server
 // name that is remembered, and the TLS timeout.
-func (c *client) leafNodeGetTLSConfigForSolicit(remote *leafNodeCfg) (bool, *tls.Config, string, float64) {
+func leafNodeGetTLSConfigForSolicit(remote *leafNodeCfg) (bool, *tls.Config, string, float64) {
 	var (
 		tlsConfig  *tls.Config
 		tlsName    string

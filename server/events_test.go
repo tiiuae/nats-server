@@ -31,9 +31,9 @@ import (
 	"time"
 
 	"github.com/nats-io/jwt/v2"
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	"github.com/nats-io/nuid"
+	"github.com/tiiuae/nats.go"
 )
 
 func createAccount(s *Server) (*Account, nkeys.KeyPair) {

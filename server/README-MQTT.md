@@ -455,7 +455,7 @@ This could have been done with having retained messages stored under
 `$MQTT.rmsg.<subject>` as opposed to all under a single subject, and make use of
 the `MaxMsgsPer` field set to 1. The `MaxMsgsPer` option was introduced well into
 the availability of MQTT and changes to the sessions was made in [PR
-#2501](https://github.com/nats-io/nats-server/pull/2501), with a conversion of
+#2501](https://github.com/tiiuae/nats-server/pull/2501), with a conversion of
 existing streams such as `$MQTT*sess*<sess ID>` into a single stream with unique
 subjects, but the changes were not made to the retained messages stream.
 
