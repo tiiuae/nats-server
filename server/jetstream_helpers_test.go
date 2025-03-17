@@ -35,8 +35,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
+	"github.com/tiiuae/nats.go"
+	"github.com/tiiuae/nats.go/jetstream"
 	"golang.org/x/time/rate"
 
 	"github.com/tiiuae/nats-server/v2/internal/antithesis"

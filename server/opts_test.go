@@ -32,8 +32,9 @@ import (
 
 	"github.com/nats-io/jwt/v2"
 	"github.com/tiiuae/nats-server/v2/conf"
-	"github.com/nats-io/nats.go"
+	"github.com/tiiuae/nats.go"
 	"github.com/nats-io/nkeys"
+	"github.com/tiiuae/nats.go"
 )
 
 func checkOptionsEqual(t *testing.T, golden, opts *Options) {
