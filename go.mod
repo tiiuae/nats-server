@@ -8,7 +8,6 @@ require (
 	github.com/klauspost/compress v1.17.11
 	github.com/minio/highwayhash v1.0.3
 	github.com/nats-io/jwt/v2 v2.7.2
-	github.com/nats-io/nats.go v1.37.0
 	github.com/nats-io/nkeys v0.4.7
 	github.com/nats-io/nuid v1.0.1
 	github.com/quic-go/quic-go v0.48.1
