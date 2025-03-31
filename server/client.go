@@ -1533,17 +1533,20 @@ func parseFrame(buf []byte) (seqNum, frameNum, frameTotal int, data []byte, err 
 }
 
 type splitMsg struct {
-	frames  [][]byte
-	present int
-	size    int
+	frames       [][]byte
+	numReceived  int
+	receivedSize int
+	receivedAt   time.Time
 }
 
 type splitMsgManager struct {
 	msgs      map[int]*splitMsg
+	seqNums   []int
 	totalSize int
 }
 
 const maxSplitMsgsMemory = 64 * 1024 * 1024
+const maxSplitMsgAge = 2 * time.Minute
 
 func newSplitMsgManager() *splitMsgManager {
 	return &splitMsgManager{
@@ -1551,25 +1554,28 @@ func newSplitMsgManager() *splitMsgManager {
 	}
 }
 
-func (s *splitMsgManager) deleteOldIfNeeded(seqNum int, frameDataSize int) {
-
-	totalMem := s.totalSize + frameDataSize
-
-	if totalMem > maxSplitMsgsMemory {
-
-		for seq, msg := range s.msgs {
-
-			if seq == seqNum {
-				continue
-			}
-
-			delete(s.msgs, seq)
-			s.totalSize -= msg.size
-
-			if s.totalSize+frameDataSize <= maxSplitMsgsMemory {
-				break
-			}
+func (s *splitMsgManager) deleteOld(newSeqNum, frameDataSize int, now time.Time) {
+	for i := 0; len(s.seqNums) > i; {
+		if s.seqNums[i] == newSeqNum {
+			i++
+			continue
 		}
+		msg := s.msgs[s.seqNums[i]]
+		if msg == nil {
+			if i == 0 {
+				s.seqNums = s.seqNums[1:]
+			}
+			continue
+		}
+		if s.totalSize+frameDataSize > maxSplitMsgsMemory || now.Sub(msg.receivedAt) > maxSplitMsgAge {
+			s.totalSize -= msg.receivedSize
+			delete(s.msgs, s.seqNums[i])
+			if i == 0 {
+				s.seqNums = s.seqNums[1:]
+			}
+			continue
+		}
+		break
 	}
 }
 
@@ -1578,41 +1584,43 @@ func (s *splitMsgManager) ProcessFrame(frame []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse datagram frame: %w", err)
 	}
+
+	now := time.Now()
+	s.deleteOld(seqNum, len(frameData), now)
+
 	if frameTotal == 1 {
 		return frameData, nil
 	}
 
-	s.deleteOldIfNeeded(seqNum, len(frameData))
-
 	msg := s.msgs[seqNum]
 	if msg != nil {
 		if len(msg.frames) != frameTotal {
-
-			s.totalSize -= msg.size
+			s.totalSize -= msg.receivedSize
 			delete(s.msgs, seqNum)
 			return nil, fmt.Errorf("received frame with mismatched total %d vs existing %d for sequence %d",
 				frameTotal, len(msg.frames), seqNum)
 		}
 	} else {
 		msg = &splitMsg{
-			frames: make([][]byte, frameTotal),
-			size:   0,
+			frames:     make([][]byte, frameTotal),
+			receivedAt: now,
 		}
 		s.msgs[seqNum] = msg
+		s.seqNums = append(s.seqNums, seqNum)
 	}
 
 	msg.frames[frameNum-1] = frameData
-	msg.size += len(frameData)
-	msg.present++
+	msg.receivedSize += len(frameData)
+	msg.numReceived++
 	s.totalSize += len(frameData)
 
-	if msg.present < frameTotal {
+	if msg.numReceived < frameTotal {
 		return nil, nil
 	}
 
 	fullMsg := bytes.Join(msg.frames, nil)
 
-	s.totalSize -= msg.size
+	s.totalSize -= msg.receivedSize
 	delete(s.msgs, seqNum)
 
 	return fullMsg, nil
