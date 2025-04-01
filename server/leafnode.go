@@ -413,6 +413,10 @@ func newLeafNodeCfg(remote *RemoteLeafOpts) *leafNodeCfg {
 				perms.Subscribe = &SubjectPermission{}
 			}
 			perms.Subscribe.Allow = remote.AllowImports
+			perms.Response = &ResponsePermission{
+				MaxMsgs: DEFAULT_ALLOW_RESPONSE_MAX_MSGS,
+				Expires: DEFAULT_ALLOW_RESPONSE_EXPIRATION,
+			}
 		}
 		if len(remote.AllowExports) > 0 {
 			if perms.Publish == nil {
