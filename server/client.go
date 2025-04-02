@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -273,7 +274,7 @@ type client struct {
 	*quicConnStream
 	quicParseMu            sync.Mutex
 	quicParseStreamNext    bool
-	quicDatagramSeqCounter uint64
+	quicDatagramSeqCounter int64
 
 	headers bool
 
@@ -1519,17 +1520,36 @@ func (c *client) readLoop(pre []byte) {
 	}
 }
 
-func parseFrame(buf []byte) (seqNum, frameNum, frameTotal int, data []byte, err error) {
-	frameHeaderEnd := bytes.IndexByte(buf, ' ')
-	if frameHeaderEnd > 0 {
-		frameHeader := bytes.NewReader(buf[:frameHeaderEnd])
-		_, err := fmt.Fscanf(frameHeader, "%d/%d/%d", &seqNum, &frameNum, &frameTotal)
-		if err != nil {
-			return 0, 0, 0, nil, err
-		}
-		return seqNum, frameNum, frameTotal, buf[frameHeaderEnd+1:], nil
+var (
+	errFrameTooSmall     = errors.New("frame too small")
+	errInvalidSeqNum     = errors.New("invalid sequence number")
+	errInvalidFrameTotal = errors.New("invalid frame total")
+	errInvalidFrameIndex = errors.New("invalid frame index")
+)
+
+func parseFrame(buf []byte) (seqNum, frameTotal, frameIndex int, data []byte, err error) {
+	if len(buf) < 3 {
+		return 0, 0, 0, nil, errFrameTooSmall
 	}
-	return 0, 0, 0, nil, fmt.Errorf("invalid frame header")
+
+	seqNumVal, bytesRead := binary.Varint(buf)
+	if bytesRead <= 0 {
+		return 0, 0, 0, nil, errInvalidSeqNum
+	}
+	buf = buf[bytesRead:]
+
+	frameTotalVal, bytesRead := binary.Varint(buf)
+	if bytesRead <= 0 {
+		return 0, 0, 0, nil, errInvalidFrameTotal
+	}
+	buf = buf[bytesRead:]
+
+	frameIndexVal, bytesRead := binary.Varint(buf)
+	if bytesRead <= 0 {
+		return 0, 0, 0, nil, errInvalidFrameIndex
+	}
+
+	return int(seqNumVal), int(frameTotalVal), int(frameIndexVal), buf[bytesRead:], nil
 }
 
 type splitMsg struct {
@@ -1580,7 +1600,7 @@ func (s *splitMsgManager) deleteOld(newSeqNum, frameDataSize int, now time.Time)
 }
 
 func (s *splitMsgManager) ProcessFrame(frame []byte) ([]byte, error) {
-	seqNum, frameNum, frameTotal, frameData, err := parseFrame(frame)
+	seqNum, frameTotal, frameIndex, frameData, err := parseFrame(frame)
 	if err != nil {
 		return nil, fmt.Errorf("parse datagram frame: %w", err)
 	}
@@ -1609,7 +1629,7 @@ func (s *splitMsgManager) ProcessFrame(frame []byte) ([]byte, error) {
 		s.seqNums = append(s.seqNums, seqNum)
 	}
 
-	msg.frames[frameNum-1] = frameData
+	msg.frames[frameIndex] = frameData
 	msg.receivedSize += len(frameData)
 	msg.numReceived++
 	s.totalSize += len(frameData)
@@ -3864,26 +3884,49 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 
 	var datagramErr error
 	if isDatagramMessage {
-
-		fullMsg := make([]byte, len(mh)+len(msg))
-		copy(fullMsg, mh)
-		copy(fullMsg[len(mh):], msg)
-
 		client.quicDatagramSeqCounter++
 
-		numFrames := (len(fullMsg) + maxFrameSize - 1) / maxFrameSize
-		for i := range numFrames {
-			start := i * maxFrameSize
-			end := min(start+maxFrameSize, len(fullMsg))
-			frame := fullMsg[start:end]
+		fullMsgLen := len(mh) + len(msg)
 
-			// Add sequence number and total frames to the frame
-			frameHeader := fmt.Sprintf("%d/%d/%d ", client.quicDatagramSeqCounter, i+1, numFrames)
-			frameWithHeader := append([]byte(frameHeader), frame...)
+		frameBuf := make([]byte, maxFrameSize)
 
-			datagramErr = client.quicConnStream.SendDatagram(frameWithHeader)
+		seqNumSize := binary.PutVarint(frameBuf[0:], client.quicDatagramSeqCounter)
+
+		estimatedHeaderSize := seqNumSize + 2*binary.MaxVarintLen64
+		maxPayloadSize := maxFrameSize - estimatedHeaderSize
+		frameCount := (fullMsgLen + maxPayloadSize - 1) / maxPayloadSize
+
+		frameIndexPos := seqNumSize + binary.PutVarint(frameBuf[seqNumSize:], int64(frameCount))
+
+		for frameIndex := range frameCount {
+			payloadPos := frameIndexPos + binary.PutVarint(frameBuf[frameIndexPos:], int64(frameIndex))
+
+			start := frameIndex * maxPayloadSize
+			end := min(start+maxPayloadSize, fullMsgLen)
+
+			frameEnd := payloadPos
+
+			// Copy from mh first
+			if start < len(mh) {
+				copyEnd := min(end, len(mh))
+				frameEnd += copy(frameBuf[payloadPos:], mh[start:copyEnd])
+
+				// If the frame can fit more data, copy from msg
+				if copyEnd < end {
+					msgStart := copyEnd - len(mh)
+					msgEnd := end - len(mh)
+					frameEnd += copy(frameBuf[frameEnd:], msg[msgStart:msgEnd])
+				}
+			} else {
+				// We're past the header, copy only from msg
+				msgStart := start - len(mh)
+				msgEnd := end - len(mh)
+				frameEnd += copy(frameBuf[payloadPos:], msg[msgStart:msgEnd])
+			}
+
+			datagramErr = client.quicConnStream.SendDatagram(frameBuf[:frameEnd])
 			if datagramErr != nil {
-				client.Debugf("Error sending datagram frame %d/%d: %v", i+1, numFrames, datagramErr)
+				client.Debugf("Error sending datagram frame %d/%d/%d: %v", client.quicDatagramSeqCounter, frameCount, frameIndex, datagramErr)
 				break
 			}
 		}
