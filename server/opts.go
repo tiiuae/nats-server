@@ -144,6 +144,11 @@ type RemoteGatewayOpts struct {
 	tlsConfigOpts *TLSConfigOpts
 }
 
+type UnreliabilityOpts struct {
+	MaxSplitMsgAge              time.Duration `json:"max_split_msg_age,omitempty"`
+	MaxSplitMsgPayloadCacheSize int64         `json:"max_split_msg_cache_size,omitempty"`
+}
+
 // LeafNodeOpts are options for a given server to accept leaf node connections and/or connect to a remote cluster.
 type LeafNodeOpts struct {
 	Host              string        `json:"addr,omitempty"`
@@ -164,6 +169,8 @@ type LeafNodeOpts struct {
 	ReconnectInterval time.Duration `json:"-"`
 
 	EnableQUIC bool `json:"-"`
+
+	Unreliability UnreliabilityOpts `json:"-"`
 
 	// Compression options
 	Compression CompressionOpts `json:"-"`
@@ -315,6 +322,7 @@ type Options struct {
 	Websocket                  WebsocketOpts     `json:"-"`
 	MQTT                       MQTTOpts          `json:"-"`
 	QUIC                       QUICOpts          `json:"-"`
+	Unreliability              UnreliabilityOpts `json:"-"`
 	ProfPort                   int               `json:"-"`
 	ProfBlockRate              int               `json:"-"`
 	PidFile                    string            `json:"-"`
@@ -1526,6 +1534,12 @@ func (o *Options) processConfigFileLine(k string, v any, errors *[]error, warnin
 			*errors = append(*errors, err)
 			return
 		}
+	case "unreliability":
+		_, mv := unwrapValue(v, &lt)
+		if err := parseUnreliability(&o.Unreliability, mv, errors, warnings); err != nil {
+			*errors = append(*errors, err)
+			return
+		}
 	case "server_tags":
 		var err error
 		switch v := v.(type) {
@@ -2346,6 +2360,11 @@ func parseLeafNodes(v any, opts *Options, errors *[]error, warnings *[]error) er
 			opts.LeafNode.ReconnectInterval = parseDuration("reconnect", tk, mv, errors, warnings)
 		case "enable_quic":
 			opts.LeafNode.EnableQUIC = mv.(bool)
+		case "unreliability":
+			if err := parseUnreliability(&opts.LeafNode.Unreliability, mv, errors, warnings); err != nil {
+				*errors = append(*errors, err)
+				continue
+			}
 		case "tls":
 			tc, err := parseTLS(tk, true)
 			if err != nil {
@@ -4843,6 +4862,37 @@ func parseMQTT(v any, o *Options, errors *[]error, warnings *[]error) error {
 	return nil
 }
 
+func setUnreliabilityDefaults(opts *UnreliabilityOpts) {
+	if opts.MaxSplitMsgAge == 0 {
+		opts.MaxSplitMsgAge = DEFAULT_MAX_SPLIT_MSG_AGE
+	}
+	if opts.MaxSplitMsgPayloadCacheSize == 0 {
+		opts.MaxSplitMsgPayloadCacheSize = DEFAULT_MAX_SPLIT_MSG_PAYLOAD_CACHE_SIZE
+	}
+}
+
+func parseUnreliability(opts *UnreliabilityOpts, v any, errors *[]error, warnings *[]error) error {
+	var lt token
+	defer convertPanicToErrorList(&lt, errors)
+	tk, v := unwrapValue(v, &lt)
+	gm, ok := v.(map[string]any)
+	if !ok {
+		return &configErr{tk, fmt.Sprintf("Expected unreliability field to be a map, got %T", v)}
+	}
+	opts.MaxSplitMsgPayloadCacheSize = DEFAULT_MAX_SPLIT_MSG_PAYLOAD_CACHE_SIZE
+	opts.MaxSplitMsgAge = DEFAULT_MAX_SPLIT_MSG_AGE
+	for mk, mv := range gm {
+		tk, mv = unwrapValue(mv, &lt)
+		switch strings.ToLower(mk) {
+		case "max_split_msg_age":
+			opts.MaxSplitMsgAge = parseDuration("max_split_msg_age", tk, mv, errors, warnings)
+		case "max_split_msg_cache_size":
+			opts.MaxSplitMsgPayloadCacheSize = mv.(int64)
+		}
+	}
+	return nil
+}
+
 func parseQUIC(v interface{}, o *Options, errors *[]error, warnings *[]error) error {
 	var lt token
 	defer convertPanicToErrorList(&lt, errors)
@@ -5280,6 +5330,8 @@ func setBaselineOptions(opts *Options) {
 			}
 		}
 	}
+	setUnreliabilityDefaults(&opts.Unreliability)
+	setUnreliabilityDefaults(&opts.LeafNode.Unreliability)
 	if opts.LeafNode.Port != 0 {
 		if opts.LeafNode.Host == _EMPTY_ {
 			opts.LeafNode.Host = DEFAULT_HOST

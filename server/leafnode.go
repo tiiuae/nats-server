@@ -1168,7 +1168,7 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 	s.startGoRoutine(func() { c.readLoop(preBuf) })
 
 	if quic {
-		s.startGoRoutine(func() { c.readDatagramLoop(nil) })
+		s.startGoRoutine(func() { c.readDatagramLoop(nil, opts.LeafNode.Unreliability) })
 	}
 
 	// We will spin the write loop for solicited connections only

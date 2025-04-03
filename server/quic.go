@@ -278,7 +278,7 @@ func (s *Server) createQUICClient(conn net.Conn) *client {
 	// Spin up the read loop.
 	s.startGoRoutine(func() { c.readLoop(nil) })
 
-	s.startGoRoutine(func() { c.readDatagramLoop(nil) })
+	s.startGoRoutine(func() { c.readDatagramLoop(nil, opts.Unreliability) })
 
 	// Spin up the write loop.
 	s.startGoRoutine(func() { c.writeLoop() })

@@ -1527,7 +1527,7 @@ var (
 	errInvalidFrameIndex = errors.New("invalid frame index")
 )
 
-func parseFrame(buf []byte) (seqNum, frameTotal, frameIndex int, data []byte, err error) {
+func parseFrame(buf []byte) (seqNum int64, frameTotal, frameIndex int, data []byte, err error) {
 	if len(buf) < 3 {
 		return 0, 0, 0, nil, errFrameTooSmall
 	}
@@ -1549,32 +1549,33 @@ func parseFrame(buf []byte) (seqNum, frameTotal, frameIndex int, data []byte, er
 		return 0, 0, 0, nil, errInvalidFrameIndex
 	}
 
-	return int(seqNumVal), int(frameTotalVal), int(frameIndexVal), buf[bytesRead:], nil
+	return seqNumVal, int(frameTotalVal), int(frameIndexVal), buf[bytesRead:], nil
 }
 
 type splitMsg struct {
 	frames       [][]byte
 	numReceived  int
-	receivedSize int
+	receivedSize int64
 	receivedAt   time.Time
 }
 
 type splitMsgManager struct {
-	msgs      map[int]*splitMsg
-	seqNums   []int
-	totalSize int
+	msgs      map[int64]*splitMsg
+	seqNums   []int64
+	totalSize int64
+	maxSize   int64
+	maxAge    time.Duration
 }
 
-const maxSplitMsgsMemory = 64 * 1024 * 1024
-const maxSplitMsgAge = 2 * time.Minute
-
-func newSplitMsgManager() *splitMsgManager {
+func newSplitMsgManager(opts *UnreliabilityOpts) *splitMsgManager {
 	return &splitMsgManager{
-		msgs: make(map[int]*splitMsg),
+		msgs:    make(map[int64]*splitMsg),
+		maxSize: opts.MaxSplitMsgPayloadCacheSize,
+		maxAge:  opts.MaxSplitMsgAge,
 	}
 }
 
-func (s *splitMsgManager) deleteOld(newSeqNum, frameDataSize int, now time.Time) {
+func (s *splitMsgManager) deleteOld(newSeqNum, frameDataSize int64, now time.Time) {
 	for i := 0; len(s.seqNums) > i; {
 		if s.seqNums[i] == newSeqNum {
 			i++
@@ -1587,7 +1588,7 @@ func (s *splitMsgManager) deleteOld(newSeqNum, frameDataSize int, now time.Time)
 			}
 			continue
 		}
-		if s.totalSize+frameDataSize > maxSplitMsgsMemory || now.Sub(msg.receivedAt) > maxSplitMsgAge {
+		if s.totalSize+frameDataSize > s.maxSize || now.Sub(msg.receivedAt) > s.maxAge {
 			s.totalSize -= msg.receivedSize
 			delete(s.msgs, s.seqNums[i])
 			if i == 0 {
@@ -1606,7 +1607,7 @@ func (s *splitMsgManager) ProcessFrame(frame []byte) ([]byte, error) {
 	}
 
 	now := time.Now()
-	s.deleteOld(seqNum, len(frameData), now)
+	s.deleteOld(seqNum, int64(len(frameData)), now)
 
 	if frameTotal == 1 {
 		return frameData, nil
@@ -1630,9 +1631,9 @@ func (s *splitMsgManager) ProcessFrame(frame []byte) ([]byte, error) {
 	}
 
 	msg.frames[frameIndex] = frameData
-	msg.receivedSize += len(frameData)
+	msg.receivedSize += int64(len(frameData))
 	msg.numReceived++
-	s.totalSize += len(frameData)
+	s.totalSize += int64(len(frameData))
 
 	if msg.numReceived < frameTotal {
 		return nil, nil
@@ -1646,7 +1647,7 @@ func (s *splitMsgManager) ProcessFrame(frame []byte) ([]byte, error) {
 	return fullMsg, nil
 }
 
-func (c *client) readDatagramLoop(pre []byte) {
+func (c *client) readDatagramLoop(pre []byte, unreliabilityOpts UnreliabilityOpts) {
 	// Grab the connection off the client, it will be cleared on a close.
 	// We check for that after the loop, but want to avoid a nil dereference
 	c.mu.Lock()
@@ -1688,7 +1689,7 @@ func (c *client) readDatagramLoop(pre []byte) {
 	var reader io.Reader
 	reader = nc
 
-	splitMsgs := newSplitMsgManager()
+	splitMsgs := newSplitMsgManager(&unreliabilityOpts)
 
 	for {
 		var n int
