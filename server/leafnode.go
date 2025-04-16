@@ -1334,7 +1334,7 @@ func (s *Server) RemoveLeafNodeRemote(leafHostname string) {
 
 	s.Debugf("Removing leaf node remote (%v) from server.leafRemoteCfgs", leafHostname)
 	{
-		newLeafRemoteCfgs := make([]*leafNodeCfg, 0, len(s.leafRemoteCfgs)-1)
+		newLeafRemoteCfgs := make([]*leafNodeCfg, 0, len(s.leafRemoteCfgs))
 		for _, leafRemoteCfg := range s.leafRemoteCfgs {
 			isRemovedLeaf := containsHost(leafRemoteCfg.URLs, leafHostname)
 			if !isRemovedLeaf {
@@ -1347,7 +1347,7 @@ func (s *Server) RemoveLeafNodeRemote(leafHostname string) {
 	s.Debugf("Removing leaf node remote (%v) from server.opts", leafHostname)
 	{
 		opts := s.getOpts()
-		newLeafNodeRemotes := make([]*RemoteLeafOpts, 0, len(opts.LeafNode.Remotes)-1)
+		newLeafNodeRemotes := make([]*RemoteLeafOpts, 0, len(opts.LeafNode.Remotes))
 		for _, leafNodeRemote := range opts.LeafNode.Remotes {
 			isRemovedLeaf := containsHost(leafNodeRemote.URLs, leafHostname)
 			if !isRemovedLeaf {
@@ -1377,9 +1377,12 @@ func (s *Server) RemoveLeafNodeRemote(leafHostname string) {
 	c.closeConnection(ClientClosed)
 }
 
-func (s *Server) AddLeafNodeRemote(remote *RemoteLeafOpts) {
+func (s *Server) AddLeafNodeRemote(remote *RemoteLeafOpts) error {
 	if remote == nil || len(remote.URLs) == 0 {
-		return
+		return fmt.Errorf("remote is nil or empty")
+	}
+	if len(remote.URLs) > 1 {
+		return fmt.Errorf("multiple URLs not supported")
 	}
 	firstURLHostname := remote.URLs[0].Hostname()
 
@@ -1395,6 +1398,7 @@ func (s *Server) AddLeafNodeRemote(remote *RemoteLeafOpts) {
 	s.Debugf("Soliticing leaf node remote (%v) connection", firstURLHostname)
 	remoteAsSlice := []*RemoteLeafOpts{remote}
 	s.solicitLeafNodeRemotes(remoteAsSlice)
+	return nil
 }
 
 func ParseLeafNodeTLSOpts(certFile, keyFile, caCertFile string, verifyAndMap bool) (*LeafNodeOpts, error) {
