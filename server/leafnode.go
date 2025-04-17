@@ -1458,6 +1458,34 @@ func ParseRemoteLeafNodeTLSOpts(certFile, keyFile, caCertFile string, verifyAndM
 	return opts, nil
 }
 
+func ParseRemoteLeafNodeCAOnlyTLSOpts(caCertFile string, verifyAndMap bool) (*RemoteLeafOpts, error) {
+	var err error
+
+	// See nats-server/server/opts.go:2495 parseRemoteLeafNodes function for reference
+	tlsOpts := &TLSConfigOpts{}
+	tlsOpts.CaFile = caCertFile
+	tlsOpts.Verify = verifyAndMap
+	tlsOpts.Map = verifyAndMap
+	tlsOpts.Ciphers = defaultCipherSuites()
+	tlsOpts.CurvePreferences = defaultCurvePreferences()
+
+	opts := &RemoteLeafOpts{}
+	opts.TLSConfig, err = GenTLSConfig(tlsOpts)
+	if err != nil {
+		return nil, err
+	}
+	opts.TLSConfig.RootCAs = opts.TLSConfig.ClientCAs
+	if tlsOpts.Timeout > 0 {
+		opts.TLSTimeout = tlsOpts.Timeout
+	} else {
+		opts.TLSTimeout = float64(DEFAULT_LEAF_TLS_TIMEOUT) / float64(time.Second)
+	}
+	opts.TLSHandshakeFirst = tlsOpts.HandshakeFirst
+	opts.tlsConfigOpts = tlsOpts
+
+	return opts, nil
+}
+
 // Will perform the client-side TLS handshake if needed. Assumes that this
 // is called by the solicit side (remote will be non nil). Returns `true`
 // if TLS is required, `false` otherwise.
