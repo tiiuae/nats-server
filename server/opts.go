@@ -293,6 +293,8 @@ type Options struct {
 	Authorization              string        `json:"-"`
 	AuthCallout                *AuthCallout  `json:"-"`
 	PingInterval               time.Duration `json:"ping_interval"`
+	ConsumerHeartbeatInterval  time.Duration `json:"consumer_heartbeat_interval"`
+	ConsumerInactiveThreshold  time.Duration `json:"consumer_inactive_threshold"`
 	MaxPingsOut                int           `json:"ping_max"`
 	HTTPHost                   string        `json:"http_host"`
 	HTTPPort                   int           `json:"http_port"`
@@ -1121,6 +1123,10 @@ func (o *Options) processConfigFileLine(k string, v any, errors *[]error, warnin
 		}
 	case "ping_interval":
 		o.PingInterval = parseDuration("ping_interval", tk, v, errors, warnings)
+	case "consumer_heartbeat_interval":
+		o.ConsumerHeartbeatInterval = parseDuration("consumer_heartbeat_interval", tk, v, errors, warnings)
+	case "consumer_inactive_threshold":
+		o.ConsumerInactiveThreshold = parseDuration("consumer_inactive_threshold", tk, v, errors, warnings)
 	case "ping_max":
 		o.MaxPingsOut = int(v.(int64))
 	case "tls":
@@ -5291,6 +5297,12 @@ func setBaselineOptions(opts *Options) {
 	}
 	if opts.PingInterval == 0 {
 		opts.PingInterval = DEFAULT_PING_INTERVAL
+	}
+	if opts.ConsumerHeartbeatInterval == 0 {
+		opts.ConsumerHeartbeatInterval = sourceHealthHB
+	}
+	if opts.ConsumerInactiveThreshold == 0 {
+		opts.ConsumerInactiveThreshold = sourceHealthCheckInterval
 	}
 	if opts.MaxPingsOut == 0 {
 		opts.MaxPingsOut = DEFAULT_PING_MAX_OUT

@@ -648,6 +648,28 @@ func (p *pingIntervalOption) Apply(server *Server) {
 	server.Noticef("Reloaded: ping_interval = %s", p.newValue)
 }
 
+// consumerHeartbeatIntervalOption implements the option interface for the `consumer_heartbeat_interval`
+// setting.
+type consumerHeartbeatIntervalOption struct {
+	noopOption
+	newValue time.Duration
+}
+
+func (p *consumerHeartbeatIntervalOption) Apply(server *Server) {
+	server.Noticef("Reloaded: consumer_heartbeat_interval = %s", p.newValue)
+}
+
+// consumerInactiveThresholdOption implements the option interface for the `consumer_inactive_threshold`
+// setting.
+type consumerInactiveThresholdOption struct {
+	noopOption
+	newValue time.Duration
+}
+
+func (p *consumerInactiveThresholdOption) Apply(server *Server) {
+	server.Noticef("Reloaded: consumer_inactive_threshold = %s", p.newValue)
+}
+
 // maxPingsOutOption implements the option interface for the `ping_max`
 // setting.
 type maxPingsOutOption struct {
@@ -1297,6 +1319,10 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			diffOpts = append(diffOpts, &maxPayloadOption{newValue: newValue.(int32)})
 		case "pinginterval":
 			diffOpts = append(diffOpts, &pingIntervalOption{newValue: newValue.(time.Duration)})
+		case "consumerheartbeatinterval":
+			diffOpts = append(diffOpts, &consumerHeartbeatIntervalOption{newValue: newValue.(time.Duration)})
+		case "consumerinactivethreshold":
+			diffOpts = append(diffOpts, &consumerInactiveThresholdOption{newValue: newValue.(time.Duration)})
 		case "maxpingsout":
 			diffOpts = append(diffOpts, &maxPingsOutOption{newValue: newValue.(int)})
 		case "writedeadline":

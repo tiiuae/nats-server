@@ -2611,10 +2611,10 @@ func (mset *stream) setupMirrorConsumer() error {
 			AckPolicy:         AckNone,
 			AckWait:           22 * time.Hour,
 			MaxDeliver:        1,
-			Heartbeat:         sourceHealthHB,
+			Heartbeat:         mset.srv.opts.ConsumerHeartbeatInterval,
 			FlowControl:       true,
 			Direct:            true,
-			InactiveThreshold: sourceHealthCheckInterval,
+			InactiveThreshold: mset.srv.opts.ConsumerInactiveThreshold,
 		},
 	}
 
@@ -2961,10 +2961,10 @@ func (mset *stream) trySetupSourceConsumer(iname string, seq uint64, startTime t
 			AckPolicy:         AckNone,
 			AckWait:           22 * time.Hour,
 			MaxDeliver:        1,
-			Heartbeat:         sourceHealthHB,
+			Heartbeat:         mset.srv.opts.ConsumerHeartbeatInterval,
 			FlowControl:       true,
 			Direct:            true,
-			InactiveThreshold: sourceHealthCheckInterval,
+			InactiveThreshold: mset.srv.opts.ConsumerInactiveThreshold,
 		},
 	}
 
