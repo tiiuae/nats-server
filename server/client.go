@@ -3836,6 +3836,7 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 	}
 
 	isDatagramMessage := c.pa.hdr > 0 &&
+		c.pa.hdr < len(msg) &&
 		bytes.Equal(getHeader(reliabilityHeader, msg[:c.pa.hdr]), reliabilityUnrealiable) &&
 		client.quicConnStream != nil
 
