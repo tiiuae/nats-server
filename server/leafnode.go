@@ -1386,6 +1386,12 @@ func (s *Server) AddLeafNodeRemote(remote *RemoteLeafOpts) error {
 	}
 	firstURLHostname := remote.URLs[0].Hostname()
 
+	// Note, this matches to the compression mode in the server, see StartLeafNodeTLSServer method.
+	remote.Compression = CompressionOpts{
+		Mode:          CompressionS2Auto,
+		RTTThresholds: defaultCompressionS2AutoRTTThresholds,
+	}
+
 	s.Debugf("Adding leaf node remote (%v) to server.opts", firstURLHostname)
 	s.mu.Lock()
 	{
