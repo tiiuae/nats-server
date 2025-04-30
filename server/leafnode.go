@@ -713,7 +713,7 @@ func (cfg *leafNodeCfg) saveUserPassword(u *url.URL) {
 	}
 }
 
-func (s *Server) StartLeafNodeTLSServer(port int, certFile, keyFile, caCertFile string, verifyAndMap bool) error {
+func (s *Server) StartLeafNodeTLSServer(port int, certFile, keyFile, caCertFile string, verifyAndMap, enableQUIC bool) error {
 	opts := s.getOpts()
 	if opts.LeafNode.Port != 0 {
 		return fmt.Errorf("leafnode port is already set to %d", opts.LeafNode.Port)
@@ -735,6 +735,7 @@ func (s *Server) StartLeafNodeTLSServer(port int, certFile, keyFile, caCertFile 
 
 	opts.LeafNode = *leafNodeOpts
 	opts.LeafNode.Port = port
+	opts.LeafNode.EnableQUIC = enableQUIC
 
 	// Note, reload can not be used, it resets accounts
 	//err := s.ReloadOptions(opts)
