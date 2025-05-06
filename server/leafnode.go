@@ -761,8 +761,11 @@ func (s *Server) StartLeafNodeTLSServer(port int, certFile, keyFile, caCertFile 
 }
 
 func (s *Server) StopLeafNodeTLSServer() error {
+	s.Debugf("Stopping leafnode server")
+
 	s.mu.Lock()
 	if s.leafNodeListener != nil {
+		s.Debugf("Stopping leafnode listener")
 		err := s.leafNodeListener.Close()
 		if err != nil {
 			s.mu.Unlock()
@@ -770,14 +773,37 @@ func (s *Server) StopLeafNodeTLSServer() error {
 		}
 
 		s.leafNodeListener = nil
+	} else {
+		s.Debugf("Leafnode listener not running")
+	}
+
+	if s.leafNodeQUICListener != nil {
+		s.Debugf("Stopping leafnode QUIC listener")
+		err := s.leafNodeQUICListener.Close()
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+
+		err = s.leafNodeQUICListener.CloseTransportAndConn()
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+
+		s.leafNodeQUICListener = nil
+	} else {
+		s.Debugf("Leafnode QUIC listener not running")
 	}
 	s.mu.Unlock()
 
+	s.Debugf("Removing leafnode remotes")
 	leafNodeRemotes := s.getLeafNodeRemoteHostnames()
 	for _, remote := range leafNodeRemotes {
 		s.RemoveLeafNodeRemote(remote)
 	}
 
+	s.Debugf("Removing leafnode remotes from options")
 	opts := s.getOpts()
 	opts.LeafNode = LeafNodeOpts{}
 
@@ -787,6 +813,7 @@ func (s *Server) StopLeafNodeTLSServer() error {
 	//	return err
 	//}
 
+	s.Debugf("Leafnode server stopped")
 	return nil
 }
 
