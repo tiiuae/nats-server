@@ -227,6 +227,7 @@ const (
 )
 
 const reliabilityHeader = "Reliability"
+const senderId = "SenderID"
 
 var reliabilityUnrealiable = []byte("unreliable")
 
@@ -1773,17 +1774,36 @@ func (c *client) readDatagramLoop(pre []byte, unreliabilityOpts UnreliabilityOpt
 		}
 		bufs[0] = b[:n]
 		frame := b[:n]
+		msgType := b[0]
+		var fullMsg []byte
+		// Video message
+		switch msgType {
+		case 0:
+			// Handle message type 0 == others
+			fullMsg, err := splitMsgs.ProcessFrame(frame)
+			if fullMsg == nil {
+				if err != nil {
+					c.Errorf("split message error: %v", err)
+				}
+				continue
+			}
+		case 1:
+			// Handle message type 1 == video
+			videoStreamId := b[1]
+			senderIdLength := b[2]
+			senderId := b[3 : senderIdLength+3]
+			rtpPacket := b[senderIdLength+4:]
 
+			header := fmt.Sprintf("LMSG %s.msg.video.%d %d%s", senderId, videoStreamId, len(rtpPacket), CR_LF)
+			fullMsg = make([]byte, len(rtpPacket)+len(header)+LEN_CR_LF)
+			copy(fullMsg, header)
+			copy(fullMsg[len(header):], rtpPacket)
+			copy(fullMsg[len(header)+len(rtpPacket):], CR_LF)
+
+		}
 		// c.Debugf("Received datagram: %q", frame[:min(len(frame), 64)])
 		// c.Debugf("Split datagram msgs: %d", len(splitMsgs.msgs))
 		// c.Debugf("Split datagram total size: %d B", splitMsgs.totalSize)
-		fullMsg, err := splitMsgs.ProcessFrame(frame)
-		if fullMsg == nil {
-			if err != nil {
-				c.Errorf("split message error: %v", err)
-			}
-			continue
-		}
 
 		// Check if the account has mappings and if so set the local readcache flag.
 		// We check here to make sure any changes such as config reload are reflected here.
@@ -3945,50 +3965,87 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 
 	var datagramErr error
 	if isDatagramMessage {
-		client.quicDatagramSeqCounter++
 
-		fullMsgLen := len(mh) + len(msg)
+		// Is video subject
+		isVideoSubject := strings.Contains(string(subject), ".msg.video.")
 
-		frameBuf := make([]byte, maxFrameSize)
-
-		seqNumSize := binary.PutVarint(frameBuf[0:], client.quicDatagramSeqCounter)
-
-		estimatedHeaderSize := seqNumSize + 2*binary.MaxVarintLen64
-		maxPayloadSize := maxFrameSize - estimatedHeaderSize
-		frameCount := (fullMsgLen + maxPayloadSize - 1) / maxPayloadSize
-
-		frameIndexPos := seqNumSize + binary.PutVarint(frameBuf[seqNumSize:], int64(frameCount))
-
-		for frameIndex := range frameCount {
-			payloadPos := frameIndexPos + binary.PutVarint(frameBuf[frameIndexPos:], int64(frameIndex))
-
-			start := frameIndex * maxPayloadSize
-			end := min(start+maxPayloadSize, fullMsgLen)
-
-			frameEnd := payloadPos
-
-			// Copy from mh first
-			if start < len(mh) {
-				copyEnd := min(end, len(mh))
-				frameEnd += copy(frameBuf[payloadPos:], mh[start:copyEnd])
-
-				// If the frame can fit more data, copy from msg
-				if copyEnd < end {
-					msgStart := copyEnd - len(mh)
-					msgEnd := end - len(mh)
-					frameEnd += copy(frameBuf[frameEnd:], msg[msgStart:msgEnd])
-				}
-			} else {
-				// We're past the header, copy only from msg
-				msgStart := start - len(mh)
-				msgEnd := end - len(mh)
-				frameEnd += copy(frameBuf[payloadPos:], msg[msgStart:msgEnd])
+		if isVideoSubject {
+			indexOfVideo := strings.Index(string(subject), ".msg.video.")
+			videoStreamId, err := strconv.ParseUint(string(subject)[indexOfVideo+len(".msg.video."):], 10, 8)
+			if err != nil {
+				client.Debugf("Error parsing video stream ID from subject %q: %v", subject, err)
+				return false
 			}
+			// Get sender id as bytes array
+			senderId := []byte(string(subject)[0:indexOfVideo])
+			frameBuf := make([]byte, len(msg)+16)
+			// Add messagetype
+			frameBuf[0] = 1 // Message type 0 = custom, 1 = video
+			frameBuf[1] = byte(videoStreamId)
+
+			// Add binary length
+			senderIdLength := byte(len(senderId))
+			frameBuf[2] = senderIdLength
+			copy(frameBuf[3:], senderId)
+			// Add null terminator
+			// Add rest of the message
+			copy(frameBuf[4+senderIdLength:], msg)
+			frameEnd := 4 + int(senderIdLength) + len(msg)
 
 			datagramErr = client.quicConnStream.SendDatagram(frameBuf[:frameEnd])
 			if datagramErr != nil {
-				client.Debugf("Error sending datagram frame %d/%d/%d: %v", client.quicDatagramSeqCounter, frameCount, frameIndex, datagramErr)
-				break
+				client.Debugf("Error sending datagram video message: %v", datagramErr)
+				return false
+			}
+
+		} else {
+
+			client.quicDatagramSeqCounter++
+
+			fullMsgLen := len(mh) + len(msg)
+
+			frameBuf := make([]byte, maxFrameSize)
+
+			frameBuf[0] = 1 // Message type 0 = custom, 1 = video
+			seqNumSize := binary.PutVarint(frameBuf[1:], client.quicDatagramSeqCounter)
+
+			estimatedHeaderSize := seqNumSize + 2*binary.MaxVarintLen64 + 1
+			maxPayloadSize := maxFrameSize - estimatedHeaderSize
+			frameCount := (fullMsgLen + maxPayloadSize - 1) / maxPayloadSize
+
+			frameIndexPos := seqNumSize + binary.PutVarint(frameBuf[seqNumSize+1:], int64(frameCount)) + 1
+
+			for frameIndex := range frameCount {
+				payloadPos := frameIndexPos + binary.PutVarint(frameBuf[frameIndexPos:], int64(frameIndex))
+
+				start := frameIndex * maxPayloadSize
+				end := min(start+maxPayloadSize, fullMsgLen)
+
+				frameEnd := payloadPos
+
+				// Copy from mh first
+				if start < len(mh) {
+					copyEnd := min(end, len(mh))
+					frameEnd += copy(frameBuf[payloadPos:], mh[start:copyEnd])
+
+					// If the frame can fit more data, copy from msg
+					if copyEnd < end {
+						msgStart := copyEnd - len(mh)
+						msgEnd := end - len(mh)
+						frameEnd += copy(frameBuf[frameEnd:], msg[msgStart:msgEnd])
+					}
+				} else {
+					// We're past the header, copy only from msg
+					msgStart := start - len(mh)
+					msgEnd := end - len(mh)
+					frameEnd += copy(frameBuf[payloadPos:], msg[msgStart:msgEnd])
+				}
+
+				datagramErr = client.quicConnStream.SendDatagram(frameBuf[:frameEnd])
+				if datagramErr != nil {
+					client.Debugf("Error sending datagram frame %d/%d/%d: %v", client.quicDatagramSeqCounter, frameCount, frameIndex, datagramErr)
+					break
+				}
 			}
 		}
 	} else {
