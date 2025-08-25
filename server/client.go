@@ -3906,11 +3906,13 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 		}
 		return true
 	}
+	subjectStr := string(subject)
+	isVideoSubject := strings.Contains(subjectStr, ".msg.video.")
 
-	isDatagramMessage := c.pa.hdr > 0 &&
+	isDatagramMessage := (isVideoSubject && client.quicConnStream != nil) || (c.pa.hdr > 0 &&
 		c.pa.hdr < len(msg) &&
 		bytes.Equal(getHeader(reliabilityHeader, msg[:c.pa.hdr]), reliabilityUnrealiable) &&
-		client.quicConnStream != nil
+		client.quicConnStream != nil)
 
 	// If we are a client and we detect that the consumer we are
 	// sending to is in a stalled state, go ahead and wait here
@@ -3959,9 +3961,6 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 	var datagramErr error
 	if isDatagramMessage {
 
-		subjectStr := string(subject)
-		// Is video subject
-		isVideoSubject := strings.Contains(subjectStr, ".msg.video.")
 		client.Debugf("Delivering datagram message to %q, isVideoSubject=%v", subject, isVideoSubject)
 
 		if isVideoSubject {
@@ -4002,7 +4001,7 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 
 			frameBuf := make([]byte, maxFrameSize)
 
-			frameBuf[0] = 1 // Message type 0 = custom, 1 = video
+			frameBuf[0] = 0 // Message type 0 = custom, 1 = video
 			seqNumSize := binary.PutVarint(frameBuf[1:], client.quicDatagramSeqCounter)
 
 			estimatedHeaderSize := seqNumSize + 2*binary.MaxVarintLen64 + 1
