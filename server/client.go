@@ -227,7 +227,6 @@ const (
 )
 
 const reliabilityHeader = "Reliability"
-const senderId = "SenderID"
 
 var reliabilityUnrealiable = []byte("unreliable")
 
@@ -1738,13 +1737,6 @@ func (c *client) readDatagramLoop(pre []byte, unreliabilityOpts UnreliabilityOpt
 	// Start read buffer.
 	b := make([]byte, bufSize)
 
-	// Websocket clients will return several slices if there are multiple
-	// websocket frames in the blind read. For non WS clients though, we
-	// will always have 1 slice per loop iteration. So we define this here
-	// so non WS clients will use bufs[0] = b[:n].
-	var _bufs [1][]byte
-	bufs := _bufs[:1]
-
 	var decompress bool
 	var reader io.Reader
 	reader = nc
@@ -1772,13 +1764,12 @@ func (c *client) readDatagramLoop(pre []byte, unreliabilityOpts UnreliabilityOpt
 				return
 			}
 		}
-		bufs[0] = b[:n]
-		frame := b[:n]
 		msgType := b[0]
 		var fullMsg []byte
 		// Video message
 		switch msgType {
 		case 0:
+			frame := b[1:n]
 			// Handle message type 0 == others
 			fullMsg, err := splitMsgs.ProcessFrame(frame)
 			if fullMsg == nil {
@@ -1793,6 +1784,8 @@ func (c *client) readDatagramLoop(pre []byte, unreliabilityOpts UnreliabilityOpt
 			senderIdLength := b[2]
 			senderId := b[3 : senderIdLength+3]
 			rtpPacket := b[senderIdLength+4:]
+
+			c.Debugf("Received datagram video message from %q", senderId)
 
 			header := fmt.Sprintf("LMSG %s.msg.video.%d %d%s", senderId, videoStreamId, len(rtpPacket), CR_LF)
 			fullMsg = make([]byte, len(rtpPacket)+len(header)+LEN_CR_LF)
@@ -3966,14 +3959,17 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 	var datagramErr error
 	if isDatagramMessage {
 
+		subjectStr := string(subject)
 		// Is video subject
-		isVideoSubject := strings.Contains(string(subject), ".msg.video.")
+		isVideoSubject := strings.Contains(subjectStr, ".msg.video.")
+		client.Debugf("Delivering datagram message to %q, isVideoSubject=%v", subject, isVideoSubject)
 
 		if isVideoSubject {
+			client.Debugf("Sending datagram video message to %q", subject)
 			indexOfVideo := strings.Index(string(subject), ".msg.video.")
 			videoStreamId, err := strconv.ParseUint(string(subject)[indexOfVideo+len(".msg.video."):], 10, 8)
 			if err != nil {
-				client.Debugf("Error parsing video stream ID from subject %q: %v", subject, err)
+				client.Errorf("Error parsing video stream ID from subject %q: %v", subject, err)
 				return false
 			}
 			// Get sender id as bytes array
@@ -3994,7 +3990,7 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 
 			datagramErr = client.quicConnStream.SendDatagram(frameBuf[:frameEnd])
 			if datagramErr != nil {
-				client.Debugf("Error sending datagram video message: %v", datagramErr)
+				client.Errorf("Error sending datagram video message: %v", datagramErr)
 				return false
 			}
 
