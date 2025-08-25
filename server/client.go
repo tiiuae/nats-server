@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -37,6 +38,8 @@ import (
 
 	"github.com/klauspost/compress/s2"
 	"github.com/nats-io/jwt/v2"
+	"github.com/pion/rtcp"
+	"github.com/pion/rtp"
 	"github.com/quic-go/quic-go"
 	"github.com/tiiuae/nats-server/v2/internal/fastrand"
 )
@@ -298,7 +301,8 @@ type client struct {
 	tags    jwt.TagList
 	nameTag string
 
-	tlsTo *time.Timer
+	tlsTo                  *time.Timer
+	rtpPacketLossDetectors *RtpPacketLossDetectorStore
 }
 
 type rrTracking struct {
@@ -665,6 +669,8 @@ func (c *client) setTraceLevel() {
 
 // Lock should be held
 func (c *client) initClient() {
+
+	c.rtpPacketLossDetectors = NewRtpPacketLossDetectorStore()
 	s := c.srv
 	c.cid = atomic.AddUint64(&s.gcid, 1)
 
@@ -1737,13 +1743,6 @@ func (c *client) readDatagramLoop(pre []byte, unreliabilityOpts UnreliabilityOpt
 	// Start read buffer.
 	b := make([]byte, bufSize)
 
-	// Websocket clients will return several slices if there are multiple
-	// websocket frames in the blind read. For non WS clients though, we
-	// will always have 1 slice per loop iteration. So we define this here
-	// so non WS clients will use bufs[0] = b[:n].
-	var _bufs [1][]byte
-	bufs := _bufs[:1]
-
 	var decompress bool
 	var reader io.Reader
 	reader = nc
@@ -1771,19 +1770,109 @@ func (c *client) readDatagramLoop(pre []byte, unreliabilityOpts UnreliabilityOpt
 				return
 			}
 		}
-		bufs[0] = b[:n]
-		frame := b[:n]
+		msgType := b[0]
+		var fullMsg []byte
+		// Video message
+		switch msgType {
+		// Normal datagram packet
+		case 0:
+			frame := b[1:n]
+			// Handle message type 0 == others
+			fullMsg, err := splitMsgs.ProcessFrame(frame)
+			if fullMsg == nil {
+				if err != nil {
+					c.Errorf("split message error: %v", err)
+				}
+				continue
+			}
+			// RTP packet
+		case 1:
 
+			// Handle message type 1 == video
+			videoStreamId := b[1]
+			senderIdLength := b[2]
+			senderId := b[3 : senderIdLength+3]
+			rtpPacket := b[senderIdLength+3:]
+
+			var p rtp.Packet
+			if err := p.Unmarshal(rtpPacket); err == nil {
+
+				videoUID := formVideoUID(senderId, videoStreamId)
+				rtpDetector := c.rtpPacketLossDetectors.GetOrCreate(videoUID, p.SSRC)
+				rctpPackets := rtpDetector.CheckAndRequest(&p)
+				for _, nack := range rctpPackets {
+					nackData, marshalErr := nack.Marshal()
+					if marshalErr != nil {
+						c.Errorf("Failed to marshal NACK: %v", marshalErr)
+						continue
+					}
+					// Send the RTCP NACK packet back to the sender and add type 2 in front of the packet
+					c.Debugf("Sending NACK for sequence numbers...")
+
+					buf := make([]byte, 3+int(senderIdLength)+len(nackData))
+					buf[0] = 2
+					buf[1] = videoStreamId
+					buf[2] = senderIdLength
+					copy(buf[3:], senderId)
+					copy(buf[3+int(senderIdLength):], nackData)
+
+					qcs.SendDatagram(buf)
+				}
+
+			}
+
+			c.Debugf("Received datagram video message from %q with length %d", senderId, len(rtpPacket))
+
+			header := fmt.Sprintf("LMSG %s.msg.video.%d %d%s", senderId, videoStreamId, len(rtpPacket), CR_LF)
+			fullMsg = make([]byte, len(rtpPacket)+len(header)+LEN_CR_LF)
+			copy(fullMsg, header)
+			copy(fullMsg[len(header):], rtpPacket)
+			copy(fullMsg[len(header)+len(rtpPacket):], CR_LF)
+			// RTCP resend request
+		case 2:
+			videoStreamId := b[1]
+			senderIdLength := b[2]
+			senderId := b[3 : senderIdLength+3]
+			rtcpPacket := b[senderIdLength+3:]
+			videoUID := fmt.Sprintf("%s.%s", string(senderId), string(videoStreamId))
+			buffer, ok := c.acc.rtpPacketBuffer.buffers[videoUID]
+			if !ok {
+				continue
+			}
+
+			// Use rtcp.Unmarshal to parse the packet
+			packets, err := rtcp.Unmarshal(rtcpPacket)
+			if err != nil {
+				// Not a valid RTCP packet, might be something else. Ignore.
+				continue
+			}
+
+			for _, packet := range packets {
+				// Check if the packet is a TransportLayerNack
+				if nack, ok := packet.(*rtcp.TransportLayerNack); ok {
+					for _, nackPair := range nack.Nacks {
+						// Get all lost sequence numbers from the NACK pair
+						lostSequences := nackPair.PacketList()
+						for _, seq := range lostSequences {
+							if rtpPacket, found := buffer.Get(seq); found {
+								c.Debugf("Retransmitting packet %d to %s", seq, qcs.RemoteAddr())
+								buf, marshalErr := rtpPacket.Marshal()
+								if marshalErr == nil {
+									// Retransmit the packet
+									qcs.SendDatagram(buf)
+								}
+							} else {
+								log.Printf("Packet %d not found in buffer for retransmission", seq)
+							}
+						}
+					}
+				}
+			}
+
+		}
 		// c.Debugf("Received datagram: %q", frame[:min(len(frame), 64)])
 		// c.Debugf("Split datagram msgs: %d", len(splitMsgs.msgs))
 		// c.Debugf("Split datagram total size: %d B", splitMsgs.totalSize)
-		fullMsg, err := splitMsgs.ProcessFrame(frame)
-		if fullMsg == nil {
-			if err != nil {
-				c.Errorf("split message error: %v", err)
-			}
-			continue
-		}
 
 		// Check if the account has mappings and if so set the local readcache flag.
 		// We check here to make sure any changes such as config reload are reflected here.
@@ -1918,6 +2007,11 @@ func (c *client) readDatagramLoop(pre []byte, unreliabilityOpts UnreliabilityOpt
 			lpacc = time.Now()
 		}
 	}
+}
+
+func formVideoUID(senderId []byte, videoStreamId byte) string {
+	videoUID := fmt.Sprintf("%s.%s", string(senderId), string(videoStreamId))
+	return videoUID
 }
 
 // Returns the appropriate closed state for a given read error.
@@ -3893,11 +3987,12 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 		}
 		return true
 	}
+	isVideoSubject := isVideoSubject(subject)
 
-	isDatagramMessage := c.pa.hdr > 0 &&
+	isDatagramMessage := (isVideoSubject && client.quicConnStream != nil) || (c.pa.hdr > 0 &&
 		c.pa.hdr < len(msg) &&
 		bytes.Equal(getHeader(reliabilityHeader, msg[:c.pa.hdr]), reliabilityUnrealiable) &&
-		client.quicConnStream != nil
+		client.quicConnStream != nil)
 
 	// If we are a client and we detect that the consumer we are
 	// sending to is in a stalled state, go ahead and wait here
@@ -3945,50 +4040,93 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 
 	var datagramErr error
 	if isDatagramMessage {
-		client.quicDatagramSeqCounter++
 
-		fullMsgLen := len(mh) + len(msg)
+		client.Debugf("Delivering datagram message to %q, isVideoSubject=%v", subject, isVideoSubject)
 
-		frameBuf := make([]byte, maxFrameSize)
-
-		seqNumSize := binary.PutVarint(frameBuf[0:], client.quicDatagramSeqCounter)
-
-		estimatedHeaderSize := seqNumSize + 2*binary.MaxVarintLen64
-		maxPayloadSize := maxFrameSize - estimatedHeaderSize
-		frameCount := (fullMsgLen + maxPayloadSize - 1) / maxPayloadSize
-
-		frameIndexPos := seqNumSize + binary.PutVarint(frameBuf[seqNumSize:], int64(frameCount))
-
-		for frameIndex := range frameCount {
-			payloadPos := frameIndexPos + binary.PutVarint(frameBuf[frameIndexPos:], int64(frameIndex))
-
-			start := frameIndex * maxPayloadSize
-			end := min(start+maxPayloadSize, fullMsgLen)
-
-			frameEnd := payloadPos
-
-			// Copy from mh first
-			if start < len(mh) {
-				copyEnd := min(end, len(mh))
-				frameEnd += copy(frameBuf[payloadPos:], mh[start:copyEnd])
-
-				// If the frame can fit more data, copy from msg
-				if copyEnd < end {
-					msgStart := copyEnd - len(mh)
-					msgEnd := end - len(mh)
-					frameEnd += copy(frameBuf[frameEnd:], msg[msgStart:msgEnd])
-				}
+		if isVideoSubject {
+			var msgPayload []byte
+			if c.pa.hdr > 0 {
+				msgPayload = msg[c.pa.hdr:]
 			} else {
-				// We're past the header, copy only from msg
-				msgStart := start - len(mh)
-				msgEnd := end - len(mh)
-				frameEnd += copy(frameBuf[payloadPos:], msg[msgStart:msgEnd])
+				msgPayload = msg
 			}
 
-			datagramErr = client.quicConnStream.SendDatagram(frameBuf[:frameEnd])
+			// Strip CR_LF from the end
+			msgPayload = msgPayload[:len(msgPayload)-LEN_CR_LF]
+
+			client.Debugf("Sending datagram video message to %q", subject)
+			senderId, videoStreamId, err := parseVideoSubject(subject)
+			if err != nil {
+				client.Errorf("Error parsing video subject %q: %v", subject, err)
+				return false
+			}
+			senderIdLength := byte(len(senderId))
+			frameBuf := make([]byte, len(msgPayload)+len(senderId)+3)
+			// Add messagetype
+			frameBuf[0] = 1 // Message type 0 = custom, 1 = video
+			frameBuf[1] = videoStreamId
+
+			// Add binary length
+			frameBuf[2] = senderIdLength
+			copy(frameBuf[3:], senderId)
+
+			// Add rest of the message
+			copy(frameBuf[3+senderIdLength:], msgPayload)
+
+			datagramErr = client.quicConnStream.SendDatagram(frameBuf)
 			if datagramErr != nil {
-				client.Debugf("Error sending datagram frame %d/%d/%d: %v", client.quicDatagramSeqCounter, frameCount, frameIndex, datagramErr)
-				break
+				client.Errorf("Error sending datagram video message: %v", datagramErr)
+				return false
+			}
+
+		} else {
+
+			client.quicDatagramSeqCounter++
+
+			fullMsgLen := len(mh) + len(msg)
+
+			frameBuf := make([]byte, maxFrameSize)
+
+			frameBuf[0] = 0 // Message type 0 = custom, 1 = video
+			seqNumSize := binary.PutVarint(frameBuf[1:], client.quicDatagramSeqCounter)
+
+			estimatedHeaderSize := seqNumSize + 2*binary.MaxVarintLen64 + 1
+			maxPayloadSize := maxFrameSize - estimatedHeaderSize
+			frameCount := (fullMsgLen + maxPayloadSize - 1) / maxPayloadSize
+
+			frameIndexPos := seqNumSize + binary.PutVarint(frameBuf[seqNumSize+1:], int64(frameCount)) + 1
+
+			for frameIndex := range frameCount {
+				payloadPos := frameIndexPos + binary.PutVarint(frameBuf[frameIndexPos:], int64(frameIndex))
+
+				start := frameIndex * maxPayloadSize
+				end := min(start+maxPayloadSize, fullMsgLen)
+
+				frameEnd := payloadPos
+
+				// Copy from mh first
+				if start < len(mh) {
+					copyEnd := min(end, len(mh))
+					frameEnd += copy(frameBuf[payloadPos:], mh[start:copyEnd])
+
+					// If the frame can fit more data, copy from msg
+					if copyEnd < end {
+						msgStart := copyEnd - len(mh)
+						msgEnd := end - len(mh)
+						frameEnd += copy(frameBuf[frameEnd:], msg[msgStart:msgEnd])
+					}
+				} else {
+					// We're past the header, copy only from msg
+					msgStart := start - len(mh)
+					msgEnd := end - len(mh)
+					frameEnd += copy(frameBuf[payloadPos:], msg[msgStart:msgEnd])
+				}
+
+				datagramErr = client.quicConnStream.SendDatagram(frameBuf[:frameEnd])
+				if datagramErr != nil {
+					client.Debugf("Error sending datagram frame %d/%d/%d: %v", client.quicDatagramSeqCounter, frameCount, frameIndex, datagramErr)
+					break
+				}
 			}
 		}
 	} else {
@@ -4032,6 +4170,55 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 	client.mu.Unlock()
 
 	return true
+}
+
+func isVideoSubject(subject []byte) bool {
+	subjectStr := string(subject)
+	isVideoSubject := strings.Contains(subjectStr, ".msg.video.")
+	return isVideoSubject
+}
+
+// parseVideoSubject parses a subject of the form:
+//
+//	<senderId>.msg.video.<videoStreamId>
+//
+// and returns the senderId bytes slice (a view over the input) and the
+// video stream id as a byte. If the subject does not match this pattern
+// or the stream id is invalid/out of range, an error is returned.
+func parseVideoSubject(subject []byte) (senderID []byte, streamID byte, err error) {
+	const marker = ".msg.video."
+	// Find the marker within the subject.
+	idx := bytes.Index(subject, []byte(marker))
+	if idx < 0 {
+		return nil, 0, fmt.Errorf("video marker %q not found in subject", marker)
+	}
+	if idx == 0 {
+		return nil, 0, fmt.Errorf("missing sender id before %q", marker)
+	}
+	// Digits for the stream id follow the marker.
+	start := idx + len(marker)
+	if start >= len(subject) {
+		return nil, 0, fmt.Errorf("missing video stream id after %q", marker)
+	}
+	// Accept only the leading run of decimal digits.
+	nb := subject[start:]
+	end := 0
+	for end < len(nb) {
+		b := nb[end]
+		if b < '0' || b > '9' {
+			break
+		}
+		end++
+	}
+	if end == 0 {
+		return nil, 0, fmt.Errorf("invalid or empty video stream id in subject")
+	}
+	// Parse as uint8
+	u, perr := strconv.ParseUint(bytesToString(nb[:end]), 10, 8)
+	if perr != nil {
+		return nil, 0, perr
+	}
+	return subject[:idx], byte(u), nil
 }
 
 // Add the given sub's client to the list of clients that need flushing.
@@ -4257,6 +4444,7 @@ func isReservedReply(reply []byte) bool {
 
 // This will decide to call the client code or router code.
 func (c *client) processInboundMsg(msg []byte) {
+
 	switch c.kind {
 	case CLIENT:
 		c.processInboundClientMsg(msg)
@@ -4970,6 +5158,28 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 		if srv := c.srv; srv != nil {
 			atomic.AddInt64(&srv.outMsgs, dlvMsgs)
 			atomic.AddInt64(&srv.outBytes, totalBytes)
+		}
+	}
+
+	isVideoSubject := isVideoSubject(subject)
+	if isVideoSubject {
+		senderId, videoStreamId, err := parseVideoSubject(subject)
+		if err == nil {
+			videoUID := formVideoUID(senderId, videoStreamId)
+			// We have a valid video subject, we can use the senderId and streamId.
+			buffer := c.acc.rtpPacketBuffer.GetOrCreate(videoUID)
+			// Parse RTP packet
+			var rtpPacket rtp.Packet
+			var payload []byte
+			if c.pa.hdr > 0 {
+				payload = msg[c.pa.hdr:]
+			} else {
+				payload = msg
+			}
+			if err := rtpPacket.Unmarshal(payload); err == nil {
+				buffer.Add(&rtpPacket)
+			}
+
 		}
 	}
 
