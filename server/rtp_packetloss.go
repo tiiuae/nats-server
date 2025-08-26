@@ -160,6 +160,7 @@ func (d *RtpPacketLossDetector) CheckAndRequest(p *rtp.Packet) []rtcp.Packet {
 const retransmissionBufferSize = 256 // Store last 256 packets
 
 type RetransmissionBufferStore struct {
+	sync.RWMutex
 	buffers map[string]*RetransmissionBuffer
 }
 
@@ -168,6 +169,23 @@ func NewRetransmissionBufferStore() *RetransmissionBufferStore {
 	return &RetransmissionBufferStore{
 		buffers: make(map[string]*RetransmissionBuffer),
 	}
+}
+
+// Create get or create method
+func (s *RetransmissionBufferStore) GetOrCreate(key string) *RetransmissionBuffer {
+	s.RLock()
+	if buf, ok := s.buffers[key]; ok {
+		s.RUnlock()
+		return buf
+	}
+	s.RUnlock()
+
+	// If not found, create a new buffer
+	buf := NewRetransmissionBuffer()
+	s.Lock()
+	s.buffers[key] = buf
+	s.Unlock()
+	return buf
 }
 
 // RetransmissionBuffer holds sent RTP packets for a short time to handle NACKs.

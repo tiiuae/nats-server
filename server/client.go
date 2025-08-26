@@ -1797,14 +1797,7 @@ func (c *client) readDatagramLoop(pre []byte, unreliabilityOpts UnreliabilityOpt
 			var p rtp.Packet
 			if err := p.Unmarshal(rtpPacket); err == nil {
 
-				videoUID := fmt.Sprintf("%s.%s", string(senderId), string(videoStreamId))
-				buffer, ok := c.acc.rtpPacketBuffer.buffers[videoUID]
-				if !ok {
-					buffer = NewRetransmissionBuffer()
-					c.acc.rtpPacketBuffer.buffers[videoUID] = buffer
-				}
-				buffer.Add(&p)
-
+				videoUID := formVideoUID(senderId, videoStreamId)
 				rtpDetector := c.rtpPacketLossDetectors.GetOrCreate(videoUID, p.SSRC)
 				rctpPackets := rtpDetector.CheckAndRequest(&p)
 				for _, nack := range rctpPackets {
@@ -2014,6 +2007,11 @@ func (c *client) readDatagramLoop(pre []byte, unreliabilityOpts UnreliabilityOpt
 			lpacc = time.Now()
 		}
 	}
+}
+
+func formVideoUID(senderId []byte, videoStreamId byte) string {
+	videoUID := fmt.Sprintf("%s.%s", string(senderId), string(videoStreamId))
+	return videoUID
 }
 
 // Returns the appropriate closed state for a given read error.
@@ -3989,8 +3987,7 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 		}
 		return true
 	}
-	subjectStr := string(subject)
-	isVideoSubject := strings.Contains(subjectStr, ".msg.video.")
+	isVideoSubject := isVideoSubject(subject)
 
 	isDatagramMessage := (isVideoSubject && client.quicConnStream != nil) || (c.pa.hdr > 0 &&
 		c.pa.hdr < len(msg) &&
@@ -4049,24 +4046,20 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 		if isVideoSubject {
 			msgPayload := msg[c.pa.hdr:]
 			client.Debugf("Sending datagram video message to %q", subject)
-			indexOfVideo := strings.Index(string(subject), ".msg.video.")
-			videoStreamId, err := strconv.ParseUint(string(subject)[indexOfVideo+len(".msg.video."):], 10, 8)
+			senderId, videoStreamId, err := parseVideoSubject(subject)
 			if err != nil {
-				client.Errorf("Error parsing video stream ID from subject %q: %v", subject, err)
+				client.Errorf("Error parsing video subject %q: %v", subject, err)
 				return false
 			}
-			// Get sender id as bytes array
-			senderId := []byte(string(subject)[0:indexOfVideo])
 			senderIdLength := byte(len(senderId))
 			frameBuf := make([]byte, len(msgPayload)+len(senderId)+3)
 			// Add messagetype
 			frameBuf[0] = 1 // Message type 0 = custom, 1 = video
-			frameBuf[1] = byte(videoStreamId)
+			frameBuf[1] = videoStreamId
 
 			// Add binary length
 			frameBuf[2] = senderIdLength
 			copy(frameBuf[3:], senderId)
-			// Add null terminator
 			// Add rest of the message
 			copy(frameBuf[3+senderIdLength:], msgPayload)
 
@@ -4167,6 +4160,55 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 	client.mu.Unlock()
 
 	return true
+}
+
+func isVideoSubject(subject []byte) bool {
+	subjectStr := string(subject)
+	isVideoSubject := strings.Contains(subjectStr, ".msg.video.")
+	return isVideoSubject
+}
+
+// parseVideoSubject parses a subject of the form:
+//
+//	<senderId>.msg.video.<videoStreamId>
+//
+// and returns the senderId bytes slice (a view over the input) and the
+// video stream id as a byte. If the subject does not match this pattern
+// or the stream id is invalid/out of range, an error is returned.
+func parseVideoSubject(subject []byte) (senderID []byte, streamID byte, err error) {
+	const marker = ".msg.video."
+	// Find the marker within the subject.
+	idx := bytes.Index(subject, []byte(marker))
+	if idx < 0 {
+		return nil, 0, fmt.Errorf("video marker %q not found in subject", marker)
+	}
+	if idx == 0 {
+		return nil, 0, fmt.Errorf("missing sender id before %q", marker)
+	}
+	// Digits for the stream id follow the marker.
+	start := idx + len(marker)
+	if start >= len(subject) {
+		return nil, 0, fmt.Errorf("missing video stream id after %q", marker)
+	}
+	// Accept only the leading run of decimal digits.
+	nb := subject[start:]
+	end := 0
+	for end < len(nb) {
+		b := nb[end]
+		if b < '0' || b > '9' {
+			break
+		}
+		end++
+	}
+	if end == 0 {
+		return nil, 0, fmt.Errorf("invalid or empty video stream id in subject")
+	}
+	// Parse as uint8
+	u, perr := strconv.ParseUint(bytesToString(nb[:end]), 10, 8)
+	if perr != nil {
+		return nil, 0, perr
+	}
+	return subject[:idx], byte(u), nil
 }
 
 // Add the given sub's client to the list of clients that need flushing.
@@ -4392,6 +4434,7 @@ func isReservedReply(reply []byte) bool {
 
 // This will decide to call the client code or router code.
 func (c *client) processInboundMsg(msg []byte) {
+
 	switch c.kind {
 	case CLIENT:
 		c.processInboundClientMsg(msg)
@@ -5105,6 +5148,22 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 		if srv := c.srv; srv != nil {
 			atomic.AddInt64(&srv.outMsgs, dlvMsgs)
 			atomic.AddInt64(&srv.outBytes, totalBytes)
+		}
+	}
+
+	isVideoSubject := isVideoSubject(subject)
+	if isVideoSubject {
+		senderId, videoStreamId, err := parseVideoSubject(subject)
+		if err == nil {
+			videoUID := formVideoUID(senderId, videoStreamId)
+			// We have a valid video subject, we can use the senderId and streamId.
+			buffer := c.acc.rtpPacketBuffer.GetOrCreate(videoUID)
+			// Parse RTP packet
+			var rtpPacket rtp.Packet
+			if err := rtpPacket.Unmarshal(msg[c.pa.hdr:]); err == nil {
+				buffer.Add(&rtpPacket)
+			}
+
 		}
 	}
 
