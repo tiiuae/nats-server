@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -37,6 +38,8 @@ import (
 
 	"github.com/klauspost/compress/s2"
 	"github.com/nats-io/jwt/v2"
+	"github.com/pion/rtcp"
+	"github.com/pion/rtp"
 	"github.com/quic-go/quic-go"
 	"github.com/tiiuae/nats-server/v2/internal/fastrand"
 )
@@ -298,7 +301,8 @@ type client struct {
 	tags    jwt.TagList
 	nameTag string
 
-	tlsTo *time.Timer
+	tlsTo                  *time.Timer
+	rtpPacketLossDetectors *RtpPacketLossDetectorStore
 }
 
 type rrTracking struct {
@@ -665,6 +669,8 @@ func (c *client) setTraceLevel() {
 
 // Lock should be held
 func (c *client) initClient() {
+
+	c.rtpPacketLossDetectors = NewRtpPacketLossDetectorStore()
 	s := c.srv
 	c.cid = atomic.AddUint64(&s.gcid, 1)
 
@@ -1768,6 +1774,7 @@ func (c *client) readDatagramLoop(pre []byte, unreliabilityOpts UnreliabilityOpt
 		var fullMsg []byte
 		// Video message
 		switch msgType {
+		// Normal datagram packet
 		case 0:
 			frame := b[1:n]
 			// Handle message type 0 == others
@@ -1778,12 +1785,48 @@ func (c *client) readDatagramLoop(pre []byte, unreliabilityOpts UnreliabilityOpt
 				}
 				continue
 			}
+			// RTP packet
 		case 1:
+
 			// Handle message type 1 == video
 			videoStreamId := b[1]
 			senderIdLength := b[2]
 			senderId := b[3 : senderIdLength+3]
-			rtpPacket := b[senderIdLength+4:]
+			rtpPacket := b[senderIdLength+3:]
+
+			var p rtp.Packet
+			if err := p.Unmarshal(rtpPacket); err == nil {
+
+				videoUID := fmt.Sprintf("%s.%s", senderId, videoStreamId)
+				buffer, ok := c.acc.rtpPacketBuffer.buffers[videoUID]
+				if !ok {
+					buffer = NewRetransmissionBuffer()
+					c.acc.rtpPacketBuffer.buffers[videoUID] = buffer
+				}
+				buffer.Add(&p)
+
+				rtpDetector := c.rtpPacketLossDetectors.GetOrCreate(videoUID, p.SSRC)
+				rctpPackets := rtpDetector.CheckAndRequest(&p)
+				for _, nack := range rctpPackets {
+					nackData, marshalErr := nack.Marshal()
+					if marshalErr != nil {
+						c.Errorf("Failed to marshal NACK: %v", marshalErr)
+						continue
+					}
+					// Send the RTCP NACK packet back to the sender and add type 2 in front of the packet
+					c.Debugf("Sending NACK for sequence numbers...")
+
+					buf := make([]byte, 3+int(senderIdLength)+len(nackData))
+					buf[0] = 2
+					buf[1] = videoStreamId
+					buf[2] = senderIdLength
+					copy(buf[3:], senderId)
+					copy(buf[3+int(senderIdLength):], nackData)
+
+					qcs.SendDatagram(buf)
+				}
+
+			}
 
 			c.Debugf("Received datagram video message from %q", senderId)
 
@@ -1792,6 +1835,46 @@ func (c *client) readDatagramLoop(pre []byte, unreliabilityOpts UnreliabilityOpt
 			copy(fullMsg, header)
 			copy(fullMsg[len(header):], rtpPacket)
 			copy(fullMsg[len(header)+len(rtpPacket):], CR_LF)
+			// RTCP resend request
+		case 2:
+			videoStreamId := b[1]
+			senderIdLength := b[2]
+			senderId := b[3 : senderIdLength+3]
+			rtcpPacket := b[senderIdLength+3:]
+			videoUID := fmt.Sprintf("%s.%s", senderId, videoStreamId)
+			buffer, ok := c.acc.rtpPacketBuffer.buffers[videoUID]
+			if !ok {
+				continue
+			}
+
+			// Use rtcp.Unmarshal to parse the packet
+			packets, err := rtcp.Unmarshal(rtcpPacket)
+			if err != nil {
+				// Not a valid RTCP packet, might be something else. Ignore.
+				continue
+			}
+
+			for _, packet := range packets {
+				// Check if the packet is a TransportLayerNack
+				if nack, ok := packet.(*rtcp.TransportLayerNack); ok {
+					for _, nackPair := range nack.Nacks {
+						// Get all lost sequence numbers from the NACK pair
+						lostSequences := nackPair.PacketList()
+						for _, seq := range lostSequences {
+							if rtpPacket, found := buffer.Get(seq); found {
+								c.Debugf("Retransmitting packet %d to %s", seq, qcs.RemoteAddr())
+								buf, marshalErr := rtpPacket.Marshal()
+								if marshalErr == nil {
+									// Retransmit the packet
+									qcs.SendDatagram(buf)
+								}
+							} else {
+								log.Printf("Packet %d not found in buffer for retransmission", seq)
+							}
+						}
+					}
+				}
+			}
 
 		}
 		// c.Debugf("Received datagram: %q", frame[:min(len(frame), 64)])
