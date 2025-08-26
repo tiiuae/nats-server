@@ -4044,7 +4044,12 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 		client.Debugf("Delivering datagram message to %q, isVideoSubject=%v", subject, isVideoSubject)
 
 		if isVideoSubject {
-			msgPayload := msg[c.pa.hdr:]
+			var msgPayload []byte
+			if c.pa.hdr > 0 {
+				msgPayload = msg[c.pa.hdr:]
+			} else {
+				msgPayload = msg
+			}
 			client.Debugf("Sending datagram video message to %q", subject)
 			senderId, videoStreamId, err := parseVideoSubject(subject)
 			if err != nil {
@@ -5160,7 +5165,13 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 			buffer := c.acc.rtpPacketBuffer.GetOrCreate(videoUID)
 			// Parse RTP packet
 			var rtpPacket rtp.Packet
-			if err := rtpPacket.Unmarshal(msg[c.pa.hdr:]); err == nil {
+			var payload []byte
+			if c.pa.hdr > 0 {
+				payload = msg[c.pa.hdr:]
+			} else {
+				payload = msg
+			}
+			if err := rtpPacket.Unmarshal(payload); err == nil {
 				buffer.Add(&rtpPacket)
 			}
 
