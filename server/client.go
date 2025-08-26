@@ -4050,6 +4050,10 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 			} else {
 				msgPayload = msg
 			}
+
+			// Strip CR_LF from the end
+			msgPayload = msgPayload[:len(msgPayload)-LEN_CR_LF]
+
 			client.Debugf("Sending datagram video message to %q", subject)
 			senderId, videoStreamId, err := parseVideoSubject(subject)
 			if err != nil {
@@ -4065,6 +4069,7 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 			// Add binary length
 			frameBuf[2] = senderIdLength
 			copy(frameBuf[3:], senderId)
+
 			// Add rest of the message
 			copy(frameBuf[3+senderIdLength:], msgPayload)
 
