@@ -1841,7 +1841,7 @@ func (c *client) readDatagramLoop(pre []byte, unreliabilityOpts UnreliabilityOpt
 			senderIdLength := b[2]
 			senderId := b[3 : senderIdLength+3]
 			rtcpPacket := b[senderIdLength+3:]
-			videoUID := fmt.Sprintf("%s.%s", senderId, videoStreamId)
+			videoUID := fmt.Sprintf("%s.%s", string(senderId), string(videoStreamId))
 			buffer, ok := c.acc.rtpPacketBuffer.buffers[videoUID]
 			if !ok {
 				continue
@@ -4056,21 +4056,20 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 			}
 			// Get sender id as bytes array
 			senderId := []byte(string(subject)[0:indexOfVideo])
-			frameBuf := make([]byte, len(msg)+16)
+			senderIdLength := byte(len(senderId))
+			frameBuf := make([]byte, len(msg)+len(senderId)+3)
 			// Add messagetype
 			frameBuf[0] = 1 // Message type 0 = custom, 1 = video
 			frameBuf[1] = byte(videoStreamId)
 
 			// Add binary length
-			senderIdLength := byte(len(senderId))
 			frameBuf[2] = senderIdLength
 			copy(frameBuf[3:], senderId)
 			// Add null terminator
 			// Add rest of the message
-			copy(frameBuf[4+senderIdLength:], msg)
-			frameEnd := 4 + int(senderIdLength) + len(msg)
+			copy(frameBuf[3+senderIdLength:], msg)
 
-			datagramErr = client.quicConnStream.SendDatagram(frameBuf[:frameEnd])
+			datagramErr = client.quicConnStream.SendDatagram(frameBuf)
 			if datagramErr != nil {
 				client.Errorf("Error sending datagram video message: %v", datagramErr)
 				return false
