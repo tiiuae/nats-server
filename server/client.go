@@ -1828,7 +1828,7 @@ func (c *client) readDatagramLoop(pre []byte, unreliabilityOpts UnreliabilityOpt
 
 			}
 
-			c.Debugf("Received datagram video message from %q", senderId)
+			c.Debugf("Received datagram video message from %q with length %d", senderId, len(rtpPacket))
 
 			header := fmt.Sprintf("LMSG %s.msg.video.%d %d%s", senderId, videoStreamId, len(rtpPacket), CR_LF)
 			fullMsg = make([]byte, len(rtpPacket)+len(header)+LEN_CR_LF)
@@ -4047,6 +4047,7 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 		client.Debugf("Delivering datagram message to %q, isVideoSubject=%v", subject, isVideoSubject)
 
 		if isVideoSubject {
+			msgPayload := msg[c.pa.hdr:]
 			client.Debugf("Sending datagram video message to %q", subject)
 			indexOfVideo := strings.Index(string(subject), ".msg.video.")
 			videoStreamId, err := strconv.ParseUint(string(subject)[indexOfVideo+len(".msg.video."):], 10, 8)
@@ -4057,7 +4058,7 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 			// Get sender id as bytes array
 			senderId := []byte(string(subject)[0:indexOfVideo])
 			senderIdLength := byte(len(senderId))
-			frameBuf := make([]byte, len(msg)+len(senderId)+3)
+			frameBuf := make([]byte, len(msgPayload)+len(senderId)+3)
 			// Add messagetype
 			frameBuf[0] = 1 // Message type 0 = custom, 1 = video
 			frameBuf[1] = byte(videoStreamId)
@@ -4067,7 +4068,7 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 			copy(frameBuf[3:], senderId)
 			// Add null terminator
 			// Add rest of the message
-			copy(frameBuf[3+senderIdLength:], msg)
+			copy(frameBuf[3+senderIdLength:], msgPayload)
 
 			datagramErr = client.quicConnStream.SendDatagram(frameBuf)
 			if datagramErr != nil {
