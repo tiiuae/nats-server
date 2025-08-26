@@ -1797,7 +1797,7 @@ func (c *client) readDatagramLoop(pre []byte, unreliabilityOpts UnreliabilityOpt
 			var p rtp.Packet
 			if err := p.Unmarshal(rtpPacket); err == nil {
 
-				videoUID := fmt.Sprintf("%s.%s", senderId, videoStreamId)
+				videoUID := fmt.Sprintf("%s.%s", string(senderId), string(videoStreamId))
 				buffer, ok := c.acc.rtpPacketBuffer.buffers[videoUID]
 				if !ok {
 					buffer = NewRetransmissionBuffer()

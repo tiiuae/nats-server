@@ -67,17 +67,17 @@ func (d *RtpPacketLossDetector) CheckAndRequest(p *rtp.Packet) []rtcp.Packet {
 		return nil
 	}
 	diff := p.SequenceNumber - d.lastSequenceNumber
-	isOldPacket := diff == 0 && diff > 0xFFF // Handle sequence number wrap-around (approx)
+	isOldPacket := diff == 0 || diff > 0xFFF // Handle sequence number wrap-around (approx)
 	log.Printf("RtpPacketLossDetector: lastSeq=%d newSeq=%d diff=%d isOldPacket=%v",
 		d.lastSequenceNumber, p.SequenceNumber, diff, isOldPacket)
 	if isOldPacket {
 		// If the received packet is older than what we expect we can remove it from the pendingNacks list
 		if _, ok := d.pendingNacks[p.SequenceNumber]; ok {
 			log.Printf("RtpPacketLossDetector: received old packet, clearing pending NACK for seq=%d", p.SequenceNumber)
+			delete(d.pendingNacks, p.SequenceNumber)
 		} else {
 			log.Printf("RtpPacketLossDetector: received old/duplicate packet, no pending NACK for seq=%d", p.SequenceNumber)
 		}
-		delete(d.pendingNacks, p.SequenceNumber)
 	}
 	// neckPairs hold entries which we want to request immediately
 	var nackPairs []rtcp.NackPair
@@ -115,7 +115,7 @@ func (d *RtpPacketLossDetector) CheckAndRequest(p *rtp.Packet) []rtcp.Packet {
 			added := 0
 			const sampleCap = 16
 			sample := make([]uint16, 0, sampleCap)
-			for seq := d.lastSequenceNumber + 1; seq != p.SequenceNumber; seq++ {
+			for seq := d.lastSequenceNumber + 1; seq < p.SequenceNumber; seq++ {
 				// Add entry for request (immediately)
 				nackPairs = append(nackPairs, rtcp.NackPair{PacketID: seq})
 				// Add entry for pending so we can retry request later
@@ -123,6 +123,7 @@ func (d *RtpPacketLossDetector) CheckAndRequest(p *rtp.Packet) []rtcp.Packet {
 					received:  now,
 					lastRetry: now,
 				}
+
 				if added < sampleCap {
 					sample = append(sample, seq)
 				}
