@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -97,6 +98,18 @@ type StreamConfig struct {
 
 	// IsClusteredSource indicates that this stream is a source for a clustered stream.
 	IsClusteredSource bool `json:"is_clustered_source"`
+
+	// CheckMessageDependencies indicates that the stream will require inbound message dependencies to be resolved before accepting the message to the stream.
+	CheckMessageDependencies bool `json:"check_message_dependencies"`
+
+	// DelayedMessagesSoftLimit is the soft limit for the number of delayed messages that can be stored in memory before error logging starts. Defaults to 100.
+	DelayedMessagesSoftLimit int `json:"delayed_messages_soft_limit"`
+
+	// MessageDependenciesEnabled indicates that the stream will track message dependencies for messages stored in this stream. Used in conjunction with MessageDependencyStreams.
+	MessageDependenciesEnabled bool `json:"message_dependencies_enabled"`
+
+	// MessageDependencyStreams is a list of streams that this stream will use when calculating outbound message dependencies.
+	MessageDependencyStreams []string `json:"message_dependency_streams"`
 }
 
 type StreamConsumerLimits struct {
@@ -306,7 +319,9 @@ type stream struct {
 
 	monitorWg sync.WaitGroup // Wait group for the monitor routine.
 
-	isClusteredSource bool
+	isClusteredSource        bool
+	delayedMessagesSoftLimit int
+	delayedMsgs              []*delayedJSMsg
 }
 
 type sourceInfo struct {
@@ -562,25 +577,32 @@ func (a *Account) addStreamWithAssignment(config *StreamConfig, fsConfig *FileSt
 	c := s.createInternalJetStreamClient()
 	ic := s.createInternalJetStreamClient()
 
+	delayedMessagesSoftLimit := 100
+	if config.DelayedMessagesSoftLimit != 0 {
+		delayedMessagesSoftLimit = config.DelayedMessagesSoftLimit
+	}
+
 	qpfx := fmt.Sprintf("[ACC:%s] stream '%s' ", a.Name, config.Name)
 	mset := &stream{
-		acc:               a,
-		jsa:               jsa,
-		cfg:               cfg,
-		js:                js,
-		srv:               s,
-		client:            c,
-		sysc:              ic,
-		tier:              tier,
-		stype:             cfg.Storage,
-		consumers:         make(map[string]*consumer),
-		msgs:              newIPQueue[*inMsg](s, qpfx+"messages"),
-		gets:              newIPQueue[*directGetReq](s, qpfx+"direct gets"),
-		qch:               make(chan struct{}),
-		mqch:              make(chan struct{}),
-		uch:               make(chan struct{}, 4),
-		sch:               make(chan struct{}, 1),
-		isClusteredSource: config.IsClusteredSource,
+		acc:                      a,
+		jsa:                      jsa,
+		cfg:                      cfg,
+		js:                       js,
+		srv:                      s,
+		client:                   c,
+		sysc:                     ic,
+		tier:                     tier,
+		stype:                    cfg.Storage,
+		consumers:                make(map[string]*consumer),
+		msgs:                     newIPQueue[*inMsg](s, qpfx+"messages"),
+		gets:                     newIPQueue[*directGetReq](s, qpfx+"direct gets"),
+		qch:                      make(chan struct{}),
+		mqch:                     make(chan struct{}),
+		uch:                      make(chan struct{}, 4),
+		sch:                      make(chan struct{}, 1),
+		isClusteredSource:        config.IsClusteredSource,
+		delayedMessagesSoftLimit: delayedMessagesSoftLimit,
+		delayedMsgs:              make([]*delayedJSMsg, 0),
 	}
 
 	// Start our signaling routine to process consumers.
@@ -4260,9 +4282,101 @@ func (mset *stream) getDirectRequest(req *JSApiMsgGetRequest, reply string) {
 	mset.outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, hdr, sm.msg, nil, 0))
 }
 
+const MessageDependenciesHeader = "MSG-DEPS"
+
+type MessageDependency struct {
+	StreamName string
+	LSeq       uint64
+}
+
+type delayedJSMsg struct {
+	subj string
+	hdr  []byte
+	msg  []byte
+	deps []MessageDependency
+}
+
+func writeMessageDependencies(dependencies []MessageDependency) ([]byte, error) {
+	deps := make([][]string, 0, len(dependencies))
+	for _, dep := range dependencies {
+		deps = append(deps, []string{dep.StreamName, strconv.FormatUint(dep.LSeq, 10)})
+	}
+	b, err := json.Marshal(deps)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal dependencies: %w", err)
+	}
+	return b, nil
+}
+
+func readMessageDependencies(b []byte) ([]MessageDependency, error) {
+	var deps [][]string
+	if err := json.Unmarshal(b, &deps); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal dependencies: %w", err)
+	}
+	dependencies := make([]MessageDependency, 0, len(deps))
+	for _, dep := range deps {
+		if len(dep) != 2 {
+			return nil, fmt.Errorf("invalid dependency format: %v", dep)
+		}
+		name := dep[0]
+		lseq, err := strconv.ParseUint(dep[1], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid sequence number for dependency '%s': %w", name, err)
+		}
+		dependencies = append(dependencies, MessageDependency{StreamName: name, LSeq: lseq})
+	}
+	return dependencies, nil
+}
+
+func (mset *stream) createMessageDependenciesHeader() ([]byte, error) {
+	deps := make([]MessageDependency, 0, len(mset.jsa.streams))
+	for _, s := range mset.jsa.streams {
+		if !slices.Contains(mset.cfg.MessageDependencyStreams, s.cfg.Name) {
+			continue
+		}
+
+		if s.lseq == 0 {
+			// Skip streams with no messages.
+			continue
+		}
+
+		deps = append(deps, MessageDependency{
+			StreamName: s.cfg.Name,
+			LSeq:       s.lseq,
+		})
+	}
+	b, err := writeMessageDependencies(deps)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write dependencies: %w", err)
+	}
+
+	separator := ":"
+	hdr := make([]byte, 0, len(hdrLine)+len(MessageDependenciesHeader)+len(separator)+len(b)+LEN_CR_LF+LEN_CR_LF)
+	hdr = append(hdr, hdrLine...)
+	hdr = append(hdr, MessageDependenciesHeader...)
+	hdr = append(hdr, separator...)
+	hdr = append(hdr, b...)
+	hdr = append(hdr, CR_LF...)
+	hdr = append(hdr, CR_LF...)
+	return hdr, nil
+}
+
 // processInboundJetStreamMsg handles processing messages bound for a stream.
 func (mset *stream) processInboundJetStreamMsg(_ *subscription, c *client, _ *Account, subject, reply string, rmsg []byte) {
 	hdr, msg := c.msgParts(copyBytes(rmsg)) // Need to copy.
+	if mset.cfg.MessageDependenciesEnabled {
+		depsHdr, err := mset.createMessageDependenciesHeader()
+		if err != nil {
+			mset.srv.Errorf("Failed to create dependencies header in stream '%s' for subject '%s': %v", mset.cfg.Name, subject, err)
+		} else {
+			mset.srv.Debugf("Created dependencies header in stream '%s' for subject '%s': %s", mset.cfg.Name, subject, string(depsHdr))
+			if hdr == nil {
+				hdr = make([]byte, 0, len(depsHdr))
+			}
+			hdr = append(hdr, depsHdr...)
+			mset.srv.Debugf("Added dependencies header in stream '%s' for subject '%s': %s", mset.cfg.Name, subject, string(hdr))
+		}
+	}
 	mset.queueInbound(mset.msgs, subject, reply, hdr, msg, nil)
 }
 
@@ -4272,7 +4386,40 @@ var (
 	errStreamClosed      = errors.New("stream closed")
 	errInvalidMsgHandler = errors.New("undefined message handler")
 	errStreamMismatch    = errors.New("expected stream does not match")
+	errMissingDepsHeader = errors.New("missing message dependencies header")
 )
+
+func (mset *stream) getMessageDependencies(hdr []byte) ([]MessageDependency, error) {
+	b := getHeader(MessageDependenciesHeader, hdr)
+	if len(b) == 0 {
+		return nil, errMissingDepsHeader
+	}
+	return readMessageDependencies(b)
+}
+
+func (mset *stream) checkMessageDependencies(msgDeps []MessageDependency) error {
+	for _, expected := range msgDeps {
+		actual := mset.jsa.streams[expected.StreamName]
+		if actual == nil {
+			return fmt.Errorf("dependency stream '%s' not found", expected.StreamName)
+		}
+
+		if expected.LSeq > actual.lseq {
+			return fmt.Errorf("dependency stream '%s' last sequence %d is less than expected %d", expected.StreamName, actual.lseq, expected.LSeq)
+		}
+	}
+	return nil
+}
+
+func (mset *stream) nextResolvedMessage() *delayedJSMsg {
+	for _, dmsg := range mset.delayedMsgs {
+		err := mset.checkMessageDependencies(dmsg.deps)
+		if err == nil {
+			return dmsg
+		}
+	}
+	return nil
+}
 
 // processJetStreamMsg is where we try to actually process the stream msg.
 func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, lseq uint64, ts int64) error {
@@ -4586,15 +4733,48 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		ts = time.Now().UnixNano()
 	}
 
+	var dependenciesErr error = nil
+	if mset.cfg.CheckMessageDependencies {
+		mset.srv.Debugf("Checking message dependencies in stream '%s' for subject '%s', header '%s'", mset.cfg.Name, subject, string(hdr))
+		msgDeps, err := mset.getMessageDependencies(hdr)
+		if err != nil {
+			mset.srv.Errorf("Failed to get message dependencies in stream '%s' for subject '%s': %v", mset.cfg.Name, subject, err)
+			// skip delay and treat as no dependencies, could be some unknown internal message
+			dependenciesErr = nil
+		} else {
+			mset.srv.Debugf("Message dependencies in stream '%s' for subject '%s': %v", mset.cfg.Name, subject, msgDeps)
+			dependenciesErr = mset.checkMessageDependencies(msgDeps)
+			if dependenciesErr != nil {
+				mset.srv.Debugf("Message dependency check failed in stream '%s' for subject '%s': %v", mset.cfg.Name, subject, dependenciesErr)
+			} else {
+				mset.srv.Debugf("Message dependency check passed in stream '%s' for subject '%s'", mset.cfg.Name, subject)
+			}
+		}
+	}
+
 	// Skip msg here.
-	if noInterest {
+	isDelayedMessage := mset.cfg.CheckMessageDependencies && dependenciesErr != nil
+	if noInterest || isDelayedMessage {
+		if isDelayedMessage {
+			mset.srv.Debugf("Delaying message in stream '%s' for subject '%s' due to unresolved dependencies: %v", mset.cfg.Name, subject, dependenciesErr)
+			mset.delayedMsgs = append(mset.delayedMsgs, &delayedJSMsg{
+				subj: subject,
+				hdr:  copyBytes(hdr),
+				msg:  copyBytes(msg),
+			})
+
+			if len(mset.delayedMsgs) > mset.delayedMessagesSoftLimit {
+				mset.srv.Warnf("Stream '%s' has %d delayed messages due to unresolved dependencies, exceeding soft limit of %d", mset.cfg.Name, len(mset.delayedMsgs), mset.delayedMessagesSoftLimit)
+			}
+		}
+
 		mset.lseq = store.SkipMsg()
 		mset.lmsgId = msgId
 		// If we have a msgId make sure to save.
 		if msgId != _EMPTY_ {
 			mset.storeMsgIdLocked(&ddentry{msgId, mset.lseq, ts})
 		}
-		if canRespond {
+		if canRespond && !isDelayedMessage {
 			response = append(pubAck, strconv.FormatUint(mset.lseq, 10)...)
 			response = append(response, '}')
 			mset.outq.sendMsg(reply, response)
@@ -4652,7 +4832,42 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 	// Store actual msg.
 	if lseq == 0 && ts == 0 {
 		seq, ts, err = store.StoreMsg(subject, hdr, msg)
+
+		if mset.cfg.CheckMessageDependencies {
+			mset.srv.Debugf("Stored message in stream '%s' for subject '%s', current delayed messages count: %d", mset.cfg.Name, subject, len(mset.delayedMsgs))
+		}
+
+		var dMsgErr error = nil
+		for {
+			if err != nil {
+				break
+			}
+
+			dmsg := mset.nextResolvedMessage()
+			if dmsg == nil {
+				break
+			}
+
+			mset.srv.Debugf("Processing previously delayed message in stream '%s' for subject '%s'", mset.cfg.Name, dmsg.subj)
+			prevSeq, prevTs := seq, ts
+			seq, ts, dMsgErr = store.StoreMsg(dmsg.subj, dmsg.hdr, dmsg.msg)
+			if dMsgErr != nil {
+				mset.srv.Errorf("Failed to store previously delayed message in stream '%s' for subject '%s': %v", mset.cfg.Name, dmsg.subj, err)
+				seq, ts = prevSeq, prevTs
+				break
+			}
+			mset.srv.Debugf("Successfully stored previously delayed message in stream '%s' for subject '%s'", mset.cfg.Name, dmsg.subj)
+
+			mset.delayedMsgs = slices.DeleteFunc(mset.delayedMsgs, func(dm *delayedJSMsg) bool {
+				return dm == dmsg
+			})
+			mset.srv.Debugf("Removed previously delayed message in stream '%s' for subject '%s' from the delayed list", mset.cfg.Name, dmsg.subj)
+		}
 	} else {
+		if mset.cfg.CheckMessageDependencies {
+			mset.srv.Warnf("Unexpected message store branch in stream '%s' for subject '%s'. This branch is not expected to be taken when message dependency checks are enabled.", mset.cfg.Name, subject)
+		}
+
 		// Make sure to take into account any message assignments that we had to skip (clfs).
 		seq = lseq + 1 - clfs
 		// Check for preAcks and the need to skip vs store.
