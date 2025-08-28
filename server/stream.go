@@ -4329,6 +4329,11 @@ type delayedJSMsg struct {
 func (mset *stream) createMessageDependenciesHeader() ([]byte, error) {
 	deps := make([]MessageDependency, 0, len(mset.jsa.streams))
 	for _, s := range mset.jsa.streams {
+		if s.cfg.Name == mset.cfg.Name {
+			// Skip self.
+			continue
+		}
+
 		if !slices.Contains(mset.cfg.MessageDependencyStreams, s.cfg.Name) {
 			continue
 		}
