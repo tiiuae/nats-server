@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tiiuae/nats.go"
+	"github.com/nats-io/nats.go"
 )
 
 // Support functions for "chaos" testing (random injected failures)
