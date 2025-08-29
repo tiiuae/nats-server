@@ -4865,11 +4865,11 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 					break
 				}
 
-				mset.srv.Debugf("Processing previously delayed message in stream '%s' for subject '%s'", mset.cfg.Name, dmsg.subj)
+				mset.srv.Debugf("Processing previously delayed message in stream '%s' for subject '%s' from '%s'", mset.cfg.Name, dmsg.subj, dmsg.source)
 				prevSeq, prevTs := seq, ts
 				seq, ts, dMsgErr = store.StoreMsg(dmsg.subj, dmsg.hdr, dmsg.msg)
 				if dMsgErr != nil {
-					mset.srv.Errorf("Failed to store previously delayed message in stream '%s' for subject '%s': %v", mset.cfg.Name, dmsg.subj, err)
+					mset.srv.Errorf("Failed to store previously delayed message in stream '%s' for subject '%s' from '%s': %v", mset.cfg.Name, dmsg.subj, dmsg.source, err)
 					seq, ts = prevSeq, prevTs
 					break
 				}
