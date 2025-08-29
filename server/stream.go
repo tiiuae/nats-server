@@ -4287,47 +4287,18 @@ func (mset *stream) getDirectRequest(req *JSApiMsgGetRequest, reply string) {
 
 const MessageDependenciesHeader = "MSG-DEPS"
 
-type MessageDependency struct {
-	StreamName string
-	LSeq       uint64
-}
-
-func (m *MessageDependency) MarshalJSON() ([]byte, error) {
-	v := []string{m.StreamName, strconv.FormatUint(m.LSeq, 10)}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-func (m *MessageDependency) UnmarshalJSON(b []byte) error {
-	var v []string
-	if err := json.Unmarshal(b, &v); err != nil {
-		return err
-	}
-	if len(v) != 2 {
-		return fmt.Errorf("invalid length for dependency, expected 2 got %d", len(v))
-	}
-	m.StreamName = v[0]
-	lseq, err := strconv.ParseUint(v[1], 10, 64)
-	if err != nil {
-		return fmt.Errorf("invalid lseq value: %w", err)
-	}
-	m.LSeq = lseq
-	return nil
-}
+type MessageDependencies = map[string]uint64
 
 type delayedJSMsg struct {
 	source string
 	subj   string
 	hdr    []byte
 	msg    []byte
-	deps   []MessageDependency
+	deps   MessageDependencies
 }
 
 func (mset *stream) createMessageDependenciesHeader() ([]byte, error) {
-	deps := make([]MessageDependency, 0, len(mset.jsa.streams))
+	deps := make(MessageDependencies)
 	for _, s := range mset.jsa.streams {
 		if s.cfg.Name == mset.cfg.Name {
 			// Skip self.
@@ -4335,6 +4306,7 @@ func (mset *stream) createMessageDependenciesHeader() ([]byte, error) {
 		}
 
 		if !slices.Contains(mset.cfg.MessageDependencyStreams, s.cfg.Name) {
+			// Skip streams not in the dependency list.
 			continue
 		}
 
@@ -4342,11 +4314,7 @@ func (mset *stream) createMessageDependenciesHeader() ([]byte, error) {
 			// Skip streams with no messages.
 			continue
 		}
-
-		deps = append(deps, MessageDependency{
-			StreamName: s.cfg.Name,
-			LSeq:       s.lseq,
-		})
+		deps[s.cfg.Name] = s.lseq
 	}
 	b, err := json.Marshal(deps)
 	if err != nil {
@@ -4392,36 +4360,34 @@ var (
 	errMissingDepsHeader = errors.New("missing message dependencies header")
 )
 
-func (mset *stream) getMessageDependencies(hdr []byte) ([]MessageDependency, error) {
+func (mset *stream) getMessageDependencies(hdr []byte) (MessageDependencies, error) {
 	b := getHeader(MessageDependenciesHeader, hdr)
 	if len(b) == 0 {
 		return nil, errMissingDepsHeader
 	}
-	var deps []MessageDependency
+	var deps MessageDependencies
 	if err := json.Unmarshal(b, &deps); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal message dependencies: %w", err)
 	}
-	for _, d := range deps {
-		if d.StreamName == _EMPTY_ {
-			return nil, fmt.Errorf("invalid dependency stream name")
+	for k, v := range deps {
+		if k == _EMPTY_ {
+			return nil, fmt.Errorf("invalid empty dependency stream name")
 		}
-
-		if d.LSeq == 0 {
-			return nil, fmt.Errorf("invalid dependency last sequence")
+		if v < 1 {
+			return nil, fmt.Errorf("invalid dependency last sequence for stream '%s'", k)
 		}
 	}
 	return deps, nil
 }
 
-func (mset *stream) checkMessageDependencies(msgDeps []MessageDependency) error {
-	for _, expected := range msgDeps {
-		actual, ok := mset.sourceStreamMsgCounts[expected.StreamName]
+func (mset *stream) checkMessageDependencies(msgDeps MessageDependencies) error {
+	for expectedName, expectedLSeq := range msgDeps {
+		actualLSeq, ok := mset.sourceStreamMsgCounts[expectedName]
 		if !ok {
-			return fmt.Errorf("dependency stream '%s' message count is zero", expected.StreamName)
+			return fmt.Errorf("dependency stream '%s' message count is zero", expectedName)
 		}
-
-		if expected.LSeq > actual {
-			return fmt.Errorf("dependency stream '%s' message count %d is less than expected %d", expected.StreamName, actual, expected.LSeq)
+		if expectedLSeq > actualLSeq {
+			return fmt.Errorf("dependency stream '%s' message count %d is less than expected %d", expectedName, actualLSeq, expectedLSeq)
 		}
 	}
 	return nil

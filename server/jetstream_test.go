@@ -23178,17 +23178,17 @@ func TestJetStreamMessageDependencyHeaders(t *testing.T) {
 	msg, err := subOne.NextMsg(time.Second)
 	require_NoError(t, err)
 	require_Equal(t, msg.Subject, streamOneMsg01)
-	require_Equal(t, msg.Header.Get("MSG-DEPS"), "[]")
+	require_Equal(t, msg.Header.Get("MSG-DEPS"), "{}")
 
 	msg, err = subOne.NextMsg(time.Second)
 	require_NoError(t, err)
 	require_Equal(t, msg.Subject, streamOneMsg02)
-	require_Equal(t, msg.Header.Get("MSG-DEPS"), "[[\"STREAM-TWO\",\"1\"]]")
+	require_Equal(t, msg.Header.Get("MSG-DEPS"), "{\"STREAM-TWO\":1}")
 
 	msg, err = subTwo.NextMsg(time.Second)
 	require_NoError(t, err)
 	require_Equal(t, msg.Subject, streamTwoMsg01)
-	require_Equal(t, msg.Header.Get("MSG-DEPS"), "[[\"STREAM-ONE\",\"1\"]]")
+	require_Equal(t, msg.Header.Get("MSG-DEPS"), "{\"STREAM-ONE\":1}")
 }
 
 func TestJetStreamMessageDependencyChecks(t *testing.T) {
