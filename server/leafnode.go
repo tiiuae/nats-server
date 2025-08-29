@@ -3937,7 +3937,6 @@ func (s *Server) leafNodeResumeConnectProcess(c *client) {
 // protocol and leafNodeResumeConnectProcess.
 // This will send LS+ the CONNECT protocol and register the leaf node.
 func (s *Server) leafNodeFinishConnectProcess(c *client) {
-	c.Errorf("leafNodeFinishConnectProcess")
 	c.mu.Lock()
 	if !c.flags.setIfNotSet(connectProcessFinished) {
 		c.mu.Unlock()
@@ -3966,7 +3965,6 @@ func (s *Server) leafNodeFinishConnectProcess(c *client) {
 			c.maxAccountConnExceeded()
 			return
 		} else if err == ErrLeafNodeLoop {
-			c.Warnf("handleLeafNodeLoop")
 			c.handleLeafNodeLoop(true)
 			return
 		}

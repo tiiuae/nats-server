@@ -29,7 +29,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tiiuae/nats.go"
+	"github.com/nats-io/nats.go"
 )
 
 func TestNRGSimple(t *testing.T) {
