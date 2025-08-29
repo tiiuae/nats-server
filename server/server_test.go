@@ -35,7 +35,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tiiuae/nats.go"
+	"github.com/nats-io/nats.go"
 )
 
 func checkForErr(totalWait, sleepDur time.Duration, f func() error) error {
