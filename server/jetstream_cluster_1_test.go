@@ -34,7 +34,7 @@ import (
 	"time"
 
 	"github.com/nats-io/jwt/v2"
-	"github.com/tiiuae/nats.go"
+	"github.com/nats-io/nats.go"
 )
 
 func TestJetStreamClusterConfig(t *testing.T) {
