@@ -38,7 +38,6 @@ import (
 	"github.com/nats-io/nuid"
 	"github.com/tiiuae/nats-server/v2/logger"
 	"github.com/tiiuae/nats-server/v2/server"
-	"github.com/tiiuae/nats.go"
 )
 
 func createLeafConn(t tLogger, host string, port int) net.Conn {

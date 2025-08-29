@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tiiuae/nats.go"
+	"github.com/nats-io/nats.go"
 )
 
 var serverConfig1 = `

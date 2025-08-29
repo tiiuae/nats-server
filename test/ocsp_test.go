@@ -23,9 +23,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	. "github.com/tiiuae/nats-server/v2/internal/ocsp"
 	"github.com/tiiuae/nats-server/v2/server"
-	"github.com/tiiuae/nats.go"
 	"golang.org/x/crypto/ocsp"
 )
 
