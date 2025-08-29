@@ -1224,6 +1224,10 @@ func (s *Server) checkStreamCfg(config *StreamConfig, acc *Account) (StreamConfi
 	if cfg.Storage == 0 {
 		cfg.Storage = FileStorage
 	}
+	if cfg.CheckMessageDependencies && cfg.Storage != MemoryStorage {
+		// Current dependency tracking works only with memory storage, because the ingested message source tracking is not saved.
+		return StreamConfig{}, NewJSStreamInvalidConfigError(fmt.Errorf("CheckMessageDependencies is allowed only when MemoryStorage is used"))
+	}
 	if cfg.Replicas == 0 {
 		cfg.Replicas = 1
 	}

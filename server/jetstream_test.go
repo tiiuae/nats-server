@@ -23140,6 +23140,44 @@ func getMessageDependencyStreamConfig(name, prefix, dep string) *nats.StreamConf
 	}
 }
 
+func TestJetStreamMessageDependencyConfig(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	streamOneName := "STREAM-ONE"
+	streamOneSubjectPrefix := "stream.one"
+	streamTwoName := "STREAM-TWO"
+	streamTwoSubjectPrefix := "stream.two"
+	streamAggregateName := "STREAM-AGGREGATE"
+
+	getAggregateConfig := func(sources ...string) *nats.StreamConfig {
+		var sArr []*nats.StreamSource
+		for _, s := range sources {
+			sArr = append(sArr, &nats.StreamSource{Name: s})
+		}
+
+		return &nats.StreamConfig{
+			Name:                     streamAggregateName,
+			Storage:                  nats.FileStorage,
+			CheckMessageDependencies: true,
+			Sources:                  sArr,
+		}
+	}
+
+	_, err := js.AddStream(getMessageDependencyStreamConfig(streamOneName, streamOneSubjectPrefix, streamTwoName))
+	require_NoError(t, err)
+
+	_, err = js.AddStream(getMessageDependencyStreamConfig(streamTwoName, streamTwoSubjectPrefix, streamOneName))
+	require_NoError(t, err)
+
+	_, err = js.AddStream(getAggregateConfig(streamOneName))
+	require_NotNil(t, err)
+	require_Equal(t, err.Error(), "nats: CheckMessageDependencies is allowed only when MemoryStorage is used")
+}
+
 func TestJetStreamMessageDependencyHeaders(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
