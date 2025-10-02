@@ -125,8 +125,8 @@ type StreamConfig struct {
 	// Metadata is additional metadata for the Stream.
 	Metadata map[string]string `json:"metadata,omitempty"`
 
-	// IsClusteredSource indicates that this stream is a source for a clustered stream.
-	IsClusteredSource bool `json:"is_clustered_source"`
+	// DeduplicateByClusteredMessageSequence indicates that the stream will use the message sequence as part of the deduplication check.
+	DeduplicateByClusteredMessageSequence bool `json:"deduplicate_by_clustered_message_sequence"`
 
 	// CheckMessageDependencies indicates that the stream will require inbound message dependencies to be resolved before accepting the message to the stream.
 	CheckMessageDependencies bool `json:"check_message_dependencies"`
@@ -512,8 +512,6 @@ type stream struct {
 	batches    *batching   // Inflight batches prior to committing them.
 	batchApply *batchApply // State to check for batch completeness before applying it.
 
-	isClusteredSource bool
-
 	delayedMessagesSoftLimit int
 	delayedMsgs              []*delayedJSMsg
 	sourceStreamMsgCounts    map[string]uint64
@@ -863,7 +861,6 @@ func (a *Account) addStreamWithAssignment(config *StreamConfig, fsConfig *FileSt
 		uch:               make(chan struct{}, 4),
 		sch:               make(chan struct{}, 1),
 		created:           time.Now().UTC(),
-		isClusteredSource:        cfg.IsClusteredSource,
 		delayedMessagesSoftLimit: func() int { if cfg.DelayedMessagesSoftLimit != 0 { return cfg.DelayedMessagesSoftLimit }; return delayedMessagesSoftLimit }(),
 		delayedMsgs:              make([]*delayedJSMsg, 0),
 		sourceStreamMsgCounts:    make(map[string]uint64),
@@ -5942,7 +5939,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		}
 
 		// Do real check only if not clustered or traceOnly flag is set.
-		if !isClustered && mset.isClusteredSource {
+		if !isClustered && mset.cfg.DeduplicateByClusteredMessageSequence {
 			ss := getHeader(JSStreamSource, hdr)
 			if len(ss) != 0 {
 				_, _, sseq := streamAndSeq(string(ss))
