@@ -4,7 +4,7 @@ go 1.23.0
 
 toolchain go1.23.1
 
-replace github.com/nats-io/nats.go => github.com/tiiuae/nats.go v0.0.0-20250828084127-6c896309230b
+replace github.com/nats-io/nats.go => github.com/tiiuae/nats.go v0.0.0-20251002084734-c8c7f14015e6
 
 require (
 	github.com/klauspost/compress v1.18.0
