@@ -128,6 +128,9 @@ type StreamConfig struct {
 	// DeduplicateByClusteredMessageSequence indicates that the stream will use the message sequence as part of the deduplication check.
 	DeduplicateByClusteredMessageSequence bool `json:"deduplicate_by_clustered_message_sequence"`
 
+	// DeduplicateByClusteredSubject indicates that the stream will use the subject of the message as part of the deduplication check.
+	DeduplicateByClusteredSubject bool `json:"deduplicate_by_clustered_subject"`
+
 	// CheckMessageDependencies indicates that the stream will require inbound message dependencies to be resolved before accepting the message to the stream.
 	CheckMessageDependencies bool `json:"check_message_dependencies"`
 
@@ -6318,6 +6321,11 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		}
 		// If we did not succeed increment clfs in case we are clustered.
 		bumpCLFS()
+
+		if mset.cfg.DeduplicateByClusteredSubject && errors.Is(err, ErrMaxMsgsPerSubject) {
+			s.Debugf("Skipping clustered subject duplicate message on subject %q for stream '%s > %s'", subject, accName, name)
+			return nil
+		}
 
 		switch err {
 		case ErrMaxMsgs, ErrMaxBytes, ErrMaxMsgsPerSubject, ErrMsgTooLarge:
