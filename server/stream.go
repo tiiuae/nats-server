@@ -6213,22 +6213,59 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		return nil
 	}
 
-	// Skip msg here.
-	if noInterest {
-		mset.lseq, _ = store.SkipMsg(0)
-		mset.lmsgId = msgId
-		// If we have a msgId make sure to save.
-		if msgId != _EMPTY_ {
-			mset.storeMsgId(&ddentry{msgId, mset.lseq, ts})
-		}
-		if canRespond {
-			response = append(pubAck, strconv.FormatUint(mset.lseq, 10)...)
-			if batchId != _EMPTY_ {
-				response = append(response, fmt.Sprintf(",\"batch\":%q,\"count\":%d}", batchId, batchSeq)...)
+	var dependenciesErr error = nil
+	if mset.cfg.CheckMessageDependencies {
+		mset.srv.Debugf("Checking message dependencies in stream '%s' for subject '%s', header '%s'", mset.cfg.Name, subject, string(hdr))
+		msgDeps, err := mset.getMessageDependencies(hdr)
+		if err != nil {
+			mset.srv.Errorf("Failed to get message dependencies in stream '%s' for subject '%s': %v", mset.cfg.Name, subject, err)
+			dependenciesErr = nil
+		} else {
+			mset.srv.Debugf("Message dependencies in stream '%s' for subject '%s': %v", mset.cfg.Name, subject, msgDeps)
+			dependenciesErr = mset.checkMessageDependencies(msgDeps)
+			if dependenciesErr != nil {
+				mset.srv.Debugf("Message dependency check failed in stream '%s' for subject '%s': %v", mset.cfg.Name, subject, dependenciesErr)
 			} else {
-				response = append(response, '}')
+				mset.srv.Debugf("Message dependency check passed in stream '%s' for subject '%s'", mset.cfg.Name, subject)
 			}
-			outq.sendMsg(reply, response)
+		}
+	}
+
+	// Skip msg here.
+	isDelayedMessage := mset.cfg.CheckMessageDependencies && dependenciesErr != nil
+	if noInterest || isDelayedMessage {
+		if isDelayedMessage {
+			source, err := getSourceStreamName(hdr)
+			if err != nil {
+				mset.srv.Errorf("Failed to get source stream name in stream '%s' for subject '%s': %v", mset.cfg.Name, subject, err)
+			} else {
+				mset.srv.Debugf("Delaying message in stream '%s' for subject '%s' from '%s' due to unresolved dependencies: %v", mset.cfg.Name, subject, source, dependenciesErr)
+				mset.delayedMsgs = append(mset.delayedMsgs, &delayedJSMsg{
+					source: source,
+					subj:   subject,
+					hdr:    copyBytes(hdr),
+					msg:    copyBytes(msg),
+				})
+
+				if len(mset.delayedMsgs) > mset.delayedMessagesSoftLimit {
+					mset.srv.Warnf("Stream '%s' has %d delayed messages due to unresolved dependencies, exceeding soft limit of %d", mset.cfg.Name, len(mset.delayedMsgs), mset.delayedMessagesSoftLimit)
+				}
+			}
+		} else {
+			mset.lseq, _ = store.SkipMsg(0)
+			mset.lmsgId = msgId
+			if msgId != _EMPTY_ {
+				mset.storeMsgId(&ddentry{msgId, mset.lseq, ts})
+			}
+			if canRespond {
+				response = append(pubAck, strconv.FormatUint(mset.lseq, 10)...)
+				if batchId != _EMPTY_ {
+					response = append(response, fmt.Sprintf(",\"batch\":%q,\"count\":%d}", batchId, batchSeq)...)
+				} else {
+					response = append(response, '}')
+				}
+				outq.sendMsg(reply, response)
+			}
 		}
 		return nil
 	}
