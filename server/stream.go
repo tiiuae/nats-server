@@ -4786,18 +4786,18 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 					mset.srv.Warnf("Stream '%s' has %d delayed messages due to unresolved dependencies, exceeding soft limit of %d", mset.cfg.Name, len(mset.delayedMsgs), mset.delayedMessagesSoftLimit)
 				}
 			}
-		}
-
-		mset.lseq = store.SkipMsg()
-		mset.lmsgId = msgId
-		// If we have a msgId make sure to save.
-		if msgId != _EMPTY_ {
-			mset.storeMsgIdLocked(&ddentry{msgId, mset.lseq, ts})
-		}
-		if canRespond && !isDelayedMessage {
-			response = append(pubAck, strconv.FormatUint(mset.lseq, 10)...)
-			response = append(response, '}')
-			mset.outq.sendMsg(reply, response)
+		} else {
+			mset.lseq = store.SkipMsg()
+			mset.lmsgId = msgId
+			// If we have a msgId make sure to save.
+			if msgId != _EMPTY_ {
+				mset.storeMsgIdLocked(&ddentry{msgId, mset.lseq, ts})
+			}
+			if canRespond {
+				response = append(pubAck, strconv.FormatUint(mset.lseq, 10)...)
+				response = append(response, '}')
+				mset.outq.sendMsg(reply, response)
+			}
 		}
 		mset.mu.Unlock()
 		return nil
