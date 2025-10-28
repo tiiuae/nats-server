@@ -4747,10 +4747,11 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		ts = time.Now().UnixNano()
 	}
 
+	var msgDeps MessageDependencies
 	var dependenciesErr error = nil
 	if mset.cfg.CheckMessageDependencies {
 		mset.srv.Debugf("Checking message dependencies in stream '%s' for subject '%s', header '%s'", mset.cfg.Name, subject, string(hdr))
-		msgDeps, err := mset.getMessageDependencies(hdr)
+		msgDeps, err = mset.getMessageDependencies(hdr)
 		if err != nil {
 			mset.srv.Errorf("Failed to get message dependencies in stream '%s' for subject '%s': %v", mset.cfg.Name, subject, err)
 			// skip delay and treat as no dependencies, could be some unknown internal message
@@ -4780,6 +4781,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 					subj:   subject,
 					hdr:    copyBytes(hdr),
 					msg:    copyBytes(msg),
+					deps:   msgDeps,
 				})
 
 				if len(mset.delayedMsgs) > mset.delayedMessagesSoftLimit {
