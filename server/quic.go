@@ -19,8 +19,9 @@ const (
 )
 
 var defaultQUICConfig = &quic.Config{
-	KeepAlivePeriod: 10 * time.Second,
-	EnableDatagrams: true,
+	KeepAlivePeriod:   10 * time.Second,
+	EnableDatagrams:   true,
+	InitialPacketSize: 1200,
 }
 
 type quicConnStream struct {
