@@ -5452,6 +5452,7 @@ type delayedJSMsg struct {
 
 func (mset *stream) createMessageDependenciesHeader() ([]byte, error) {
 	deps := make(MessageDependencies)
+	mset.mu.RLock()
 	for _, s := range mset.jsa.streams {
 		if s.cfg.Name == mset.cfg.Name {
 			// Skip self.
@@ -5469,6 +5470,7 @@ func (mset *stream) createMessageDependenciesHeader() ([]byte, error) {
 		}
 		deps[s.cfg.Name] = s.lseq
 	}
+	mset.mu.RUnlock()
 	b, err := json.Marshal(deps)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal message dependencies: %w", err)
