@@ -4304,7 +4304,7 @@ type delayedJSMsg struct {
 
 func (mset *stream) createMessageDependenciesHeader() ([]byte, error) {
 	deps := make(MessageDependencies)
-	mset.mu.RLock()
+	//mset.mu.RLock()
 	for _, s := range mset.jsa.streams {
 		if s.cfg.Name == mset.cfg.Name {
 			// Skip self.
@@ -4322,7 +4322,7 @@ func (mset *stream) createMessageDependenciesHeader() ([]byte, error) {
 		}
 		deps[s.cfg.Name] = s.lseq
 	}
-	mset.mu.RUnlock()
+	//mset.mu.RUnlock()
 	b, err := json.Marshal(deps)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal message dependencies: %w", err)
@@ -4341,6 +4341,7 @@ func (mset *stream) createMessageDependenciesHeader() ([]byte, error) {
 
 // processInboundJetStreamMsg handles processing messages bound for a stream.
 func (mset *stream) processInboundJetStreamMsg(_ *subscription, c *client, _ *Account, subject, reply string, rmsg []byte) {
+	mset.srv.Debugf("Start processing inbound msg in stream '%s' for subject '%s'", mset.cfg.Name, subject)
 	hdr, msg := c.msgParts(copyBytes(rmsg)) // Need to copy.
 	if mset.cfg.MessageDependenciesEnabled {
 		depsHdr, err := mset.createMessageDependenciesHeader()
