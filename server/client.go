@@ -1427,6 +1427,7 @@ func (c *client) readLoop(pre []byte) {
 			}
 		}
 		if ws {
+			c.srv.Debugf("Reading data from WebSocket")
 			bufs, err = c.wsRead(wsr, reader, b[:n])
 			if bufs == nil && err != nil {
 				if err != io.EOF {
