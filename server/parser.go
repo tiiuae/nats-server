@@ -427,6 +427,9 @@ func (c *client) parse(buf []byte) error {
 				if err := c.processPub(arg); err != nil {
 					return err
 				}
+				if c.isWebsocket() {
+					c.srv.Debugf("WEBSOCKET PUB with subject %q (kind %s, host %s, name: %s, nameTag %s)", c.pa.subject, c.kindString(), c.host, c.GetName(), c.nameTag)
+				}
 
 				c.drop, c.as, c.state = 0, i+1, MSG_PAYLOAD
 				// If we don't have a saved buffer then jump ahead with

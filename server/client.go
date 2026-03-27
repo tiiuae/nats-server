@@ -1427,7 +1427,7 @@ func (c *client) readLoop(pre []byte) {
 			}
 		}
 		if ws {
-			c.srv.Debugf("Reading data from WebSocket")
+			c.srv.Debugf("WEBSOCKET: Reading data (kind %s, host %s, name: %s, nameTag %s)", c.kindString(), c.host, c.GetName(), c.nameTag)
 			bufs, err = c.wsRead(wsr, reader, b[:n])
 			if bufs == nil && err != nil {
 				if err != io.EOF {
@@ -2235,14 +2235,14 @@ func (c *client) markConnAsClosed(reason ClosedState) {
 	if c.srv != nil {
 		if c.kind == LEAF {
 			if c.acc != nil {
-				c.Noticef("%s connection closed: %s - Account: %s", c.kindString(), reason, c.acc.traceLabel())
+				c.Noticef("LEAF %s connection closed: %s - Account: %s", c.kindString(), reason, c.acc.traceLabel())
 			} else {
-				c.Noticef("%s connection closed: %s", c.kindString(), reason)
+				c.Noticef("LEAF %s connection closed: %s", c.kindString(), reason)
 			}
 		} else if c.kind == ROUTER || c.kind == GATEWAY {
-			c.Noticef("%s connection closed: %s", c.kindString(), reason)
+			c.Noticef("ROUTER/GATEWAY %s connection closed: %s", c.kindString(), reason)
 		} else { // Client, System, Jetstream, and Account connections.
-			c.Debugf("%s connection closed: %s", c.kindString(), reason)
+			c.Debugf("OTHER connection closed (kind %s, host %s, name: %s, nameTag %s), reason: %s", c.kindString(), c.host, c.GetName(), c.nameTag, reason)
 		}
 	}
 
