@@ -37,8 +37,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/nats-io/nats-server/v2/internal/antithesis"
-	srvlog "github.com/nats-io/nats-server/v2/logger"
+	"github.com/tiiuae/nats-server/v2/internal/antithesis"
+	srvlog "github.com/tiiuae/nats-server/v2/logger"
 )
 
 func checkForErr(totalWait, sleepDur time.Duration, f func() error) error {

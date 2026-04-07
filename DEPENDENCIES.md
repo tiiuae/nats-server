@@ -5,7 +5,7 @@ This file lists the dependencies used in this repository.
 | Dependency | License |
 |-|-|
 | Go | BSD 3-Clause "New" or "Revised" License |
-| github.com/nats-io/nats-server/v2 | Apache License 2.0 |
+| github.com/tiiuae/nats-server/v2 | Apache License 2.0 |
 | github.com/google/go-tpm | Apache License 2.0 |
 | github.com/klauspost/compress | BSD 3-Clause "New" or "Revised" License |
 | github.com/minio/highwayhash | Apache License 2.0 |

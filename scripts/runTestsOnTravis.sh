@@ -10,7 +10,7 @@ if [ "$1" = "compile" ]; then
     go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.4;
     golangci-lint run;
     if [ "$TRAVIS_TAG" != "" ]; then
-        go test -v -run=TestVersionMatchesTag ./server -ldflags="-X=github.com/nats-io/nats-server/v2/server.serverVersion=$TRAVIS_TAG" -count=1 -vet=off
+        go test -v -run=TestVersionMatchesTag ./server -ldflags="-X=github.com/tiiuae/nats-server/v2/server.serverVersion=$TRAVIS_TAG" -count=1 -vet=off
     fi
 
 elif [ "$1" = "build_only" ]; then
@@ -121,7 +121,7 @@ elif [ "$1" = "srv_pkg_non_js_tests" ]; then
     # Ignore JWT and NRG tests here as they have their own matrix run.
 
     # Also including the ldflag with the version since this includes the `TestVersionMatchesTag`.
-    go test $RACE -v -p=1 ./server/... -run="^Test(N[^R]|NR[^G]|J[^W]|JW[^T]|[^JN])" -ldflags="-X=github.com/nats-io/nats-server/v2/server.serverVersion=$TRAVIS_TAG" -tags=skip_store_tests,skip_js_tests,skip_mqtt_tests,skip_msgtrace_tests,skip_no_race_tests -count=1 -vet=off -timeout=30m -failfast
+    go test $RACE -v -p=1 ./server/... -run="^Test(N[^R]|NR[^G]|J[^W]|JW[^T]|[^JN])" -ldflags="-X=github.com/tiiuae/nats-server/v2/server.serverVersion=$TRAVIS_TAG" -tags=skip_store_tests,skip_js_tests,skip_mqtt_tests,skip_msgtrace_tests,skip_no_race_tests -count=1 -vet=off -timeout=30m -failfast
 
 elif [ "$1" = "jwt_tests" ]; then
 

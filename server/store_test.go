@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats-server/v2/server/gsl"
+	"github.com/tiiuae/nats-server/v2/server/gsl"
 )
 
 func testAllStoreAllPermutations(t *testing.T, compressionAndEncryption bool, cfg StreamConfig, fn func(t *testing.T, fs StreamStore)) {

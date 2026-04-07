@@ -39,7 +39,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"golang.org/x/time/rate"
 
-	"github.com/nats-io/nats-server/v2/internal/antithesis"
+	"github.com/tiiuae/nats-server/v2/internal/antithesis"
 )
 
 // Support functions

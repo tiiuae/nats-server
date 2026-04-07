@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats-server/v2/server/gsl"
+	"github.com/tiiuae/nats-server/v2/server/gsl"
 )
 
 // Print Results: go test -v  --args --results
