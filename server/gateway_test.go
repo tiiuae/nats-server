@@ -31,12 +31,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats-server/v2/logger"
+	"github.com/tiiuae/nats-server/v2/logger"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	"golang.org/x/crypto/ocsp"
 
-	. "github.com/nats-io/nats-server/v2/internal/ocsp"
+	. "github.com/tiiuae/nats-server/v2/internal/ocsp"
 )
 
 func init() {

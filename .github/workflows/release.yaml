@@ -29,7 +29,7 @@ jobs:
         env:
           TRAVIS_TAG: ${{ github.ref_name }}
         run: |
-          go test -race -v -run=TestVersionMatchesTag ./server -ldflags="-X=github.com/nats-io/nats-server/v2/server.serverVersion=$TRAVIS_TAG" -count=1 -vet=off
+          go test -race -v -run=TestVersionMatchesTag ./server -ldflags="-X=github.com/tiiuae/nats-server/v2/server.serverVersion=$TRAVIS_TAG" -count=1 -vet=off
 
       - name: Install cosign
         # Use commit hash here to avoid a re-tagging attack, as this is a third-party action
