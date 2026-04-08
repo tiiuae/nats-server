@@ -1671,6 +1671,12 @@ func (s *Server) AddLeafNodeRemote(remote *RemoteLeafOpts) error {
 		RTTThresholds: defaultCompressionS2AutoRTTThresholds,
 	}
 
+	// Set default first info timeout if not set (normally done in
+	// setBaselineOptions, but dynamic remotes bypass that).
+	if remote.FirstInfoTimeout <= 0 {
+		remote.FirstInfoTimeout = DEFAULT_LEAFNODE_INFO_WAIT
+	}
+
 	s.Debugf("Adding leaf node remote (%v) to server.opts", firstURLHostname)
 	s.mu.Lock()
 	{
