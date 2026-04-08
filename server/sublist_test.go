@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/nats-io/nuid"
-	"github.com/tiiuae/nats-server/v2/server/stree"
 )
 
 func stackFatalf(t *testing.T, f string, args ...any) {

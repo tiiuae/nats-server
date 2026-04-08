@@ -47,7 +47,6 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/nats-io/nkeys"
 	"github.com/nats-io/nuid"
-	"github.com/tiiuae/nats-server/v2/server/sysmem"
 )
 
 func TestJetStreamBasicNilConfig(t *testing.T) {
