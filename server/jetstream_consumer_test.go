@@ -36,9 +36,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tiiuae/nats.go/jetstream"
+	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/tiiuae/nats.go"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nuid"
 )
 
