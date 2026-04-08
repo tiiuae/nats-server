@@ -4,7 +4,7 @@ go 1.25.0
 
 toolchain go1.25.9
 
-//replace github.com/nats-io/nats.go => github.com/tiiuae/nats.go v0.0.0-20251002084734-c8c7f14015e6
+replace github.com/nats-io/nats.go => github.com/tiiuae/nats.go v0.0.0-20260408095857-3a5df0c1554a
 
 require (
 	github.com/antithesishq/antithesis-sdk-go v0.6.0-default-no-op
