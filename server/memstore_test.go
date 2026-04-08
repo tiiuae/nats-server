@@ -25,8 +25,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tiiuae/nats-server/v2/server/gsl"
 	"github.com/nats-io/nuid"
+	"github.com/tiiuae/nats-server/v2/server/gsl"
 )
 
 func TestMemStoreBasics(t *testing.T) {

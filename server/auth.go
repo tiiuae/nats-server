@@ -31,8 +31,8 @@ import (
 	"time"
 
 	"github.com/nats-io/jwt/v2"
-	"github.com/tiiuae/nats-server/v2/internal/ldap"
 	"github.com/nats-io/nkeys"
+	"github.com/tiiuae/nats-server/v2/internal/ldap"
 	"golang.org/x/crypto/bcrypt"
 )
 

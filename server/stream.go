@@ -34,8 +34,8 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/s2"
-	"github.com/tiiuae/nats-server/v2/server/gsl"
 	"github.com/nats-io/nuid"
+	"github.com/tiiuae/nats-server/v2/server/gsl"
 )
 
 // StreamConfigRequest is used to create or update a stream.
@@ -858,15 +858,20 @@ func (a *Account) addStreamWithAssignment(config *StreamConfig, fsConfig *FileSt
 			ipqLimitByLen[*inMsg](mlen),
 			ipqLimitBySize[*inMsg](msz),
 		),
-		gets:              newIPQueue[*directGetReq](s, qpfx+"direct gets"),
-		qch:               make(chan struct{}),
-		mqch:              make(chan struct{}),
-		uch:               make(chan struct{}, 4),
-		sch:               make(chan struct{}, 1),
-		created:           time.Now().UTC(),
-		delayedMessagesSoftLimit: func() int { if cfg.DelayedMessagesSoftLimit != 0 { return cfg.DelayedMessagesSoftLimit }; return delayedMessagesSoftLimit }(),
-		delayedMsgs:              make([]*delayedJSMsg, 0),
-		sourceStreamMsgCounts:    make(map[string]uint64),
+		gets:    newIPQueue[*directGetReq](s, qpfx+"direct gets"),
+		qch:     make(chan struct{}),
+		mqch:    make(chan struct{}),
+		uch:     make(chan struct{}, 4),
+		sch:     make(chan struct{}, 1),
+		created: time.Now().UTC(),
+		delayedMessagesSoftLimit: func() int {
+			if cfg.DelayedMessagesSoftLimit != 0 {
+				return cfg.DelayedMessagesSoftLimit
+			}
+			return delayedMessagesSoftLimit
+		}(),
+		delayedMsgs:           make([]*delayedJSMsg, 0),
+		sourceStreamMsgCounts: make(map[string]uint64),
 	}
 
 	// Add created timestamp used for the store, must match that of the stream assignment if it exists.

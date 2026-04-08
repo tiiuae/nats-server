@@ -32,10 +32,10 @@ import (
 	"time"
 
 	"github.com/minio/highwayhash"
-	"github.com/tiiuae/nats-server/v2/server/sysmem"
-	"github.com/tiiuae/nats-server/v2/server/tpm"
 	"github.com/nats-io/nkeys"
 	"github.com/nats-io/nuid"
+	"github.com/tiiuae/nats-server/v2/server/sysmem"
+	"github.com/tiiuae/nats-server/v2/server/tpm"
 )
 
 // JetStreamConfig determines this server's configuration.
