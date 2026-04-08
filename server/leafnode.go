@@ -711,24 +711,32 @@ func (s *Server) connectToRemoteLeafNode(remote *leafNodeCfg, firstConnect bool)
 				s.Debugf("Will not attempt to connect to remote server on %q%s, leafnodes currently disabled", rURL.Host, ipStr)
 				err = ErrLeafNodeDisabled
 			} else {
-				s.Debugf("Trying to connect as leafnode to remote server on %q%s", rURL.Host, ipStr)
-
-				// Check if proxy is configured
-				if proxyURL != _EMPTY_ {
-					targetHost := rURL.Host
-					// If URL doesn't include port, add the default port for the scheme
-					if rURL.Port() == _EMPTY_ {
-						defaultPort := "80"
-						if rURL.Scheme == wsSchemePrefixTLS {
-							defaultPort = "443"
-						}
-						targetHost = net.JoinHostPort(rURL.Hostname(), defaultPort)
-					}
-
-					conn, err = establishHTTPProxyTunnel(proxyURL, targetHost, proxyTimeout, proxyUsername, proxyPassword)
+				if isQUICURL(rURL) {
+					s.Debugf("Trying to connect as leafnode to remote server on %q%s using QUIC", rURL.Host, ipStr)
+					conn, err = (&quicDialer{
+						tlsConfig:  makeLeafQUICTLSConfig(remote),
+						quicConfig: makeLeafQUICConfig(&opts.QUIC, dialTimeout),
+					}).Dial("udp", url)
 				} else {
-					// Direct connection
-					conn, err = natsDialTimeout("tcp", url, dialTimeout)
+					s.Debugf("Trying to connect as leafnode to remote server on %q%s", rURL.Host, ipStr)
+
+					// Check if proxy is configured
+					if proxyURL != _EMPTY_ {
+						targetHost := rURL.Host
+						// If URL doesn't include port, add the default port for the scheme
+						if rURL.Port() == _EMPTY_ {
+							defaultPort := "80"
+							if rURL.Scheme == wsSchemePrefixTLS {
+								defaultPort = "443"
+							}
+							targetHost = net.JoinHostPort(rURL.Hostname(), defaultPort)
+						}
+
+						conn, err = establishHTTPProxyTunnel(proxyURL, targetHost, proxyTimeout, proxyUsername, proxyPassword)
+					} else {
+						// Direct connection
+						conn, err = natsDialTimeout("tcp", url, dialTimeout)
+					}
 				}
 			}
 		}
