@@ -1581,6 +1581,9 @@ func (s *Server) checkStreamCfg(config *StreamConfig, acc *Account, pedantic boo
 	if _, err := cfg.Storage.MarshalJSON(); err != nil {
 		return cfg, NewJSStreamInvalidConfigError(fmt.Errorf("invalid storage type"))
 	}
+	if cfg.CheckMessageDependencies && cfg.Storage != MemoryStorage {
+		return cfg, NewJSStreamInvalidConfigError(fmt.Errorf("CheckMessageDependencies is allowed only when MemoryStorage is used"))
+	}
 
 	if cfg.Replicas == 0 {
 		cfg.Replicas = 1
@@ -5491,6 +5494,17 @@ func (mset *stream) createMessageDependenciesHeader() ([]byte, error) {
 func (mset *stream) processInboundJetStreamMsg(_ *subscription, c *client, _ *Account, subject, reply string, rmsg []byte) {
 	hdr, msg := c.msgParts(copyBytes(rmsg)) // Need to copy.
 	hdr = removeHeaderStatusIfPresent(hdr)
+	if mset.cfg.MessageDependenciesEnabled {
+		depsHdr, err := mset.createMessageDependenciesHeader()
+		if err != nil {
+			mset.srv.Errorf("Failed to create dependencies header in stream '%s' for subject '%s': %v", mset.cfg.Name, subject, err)
+		} else {
+			if hdr == nil {
+				hdr = make([]byte, 0, len(depsHdr))
+			}
+			hdr = append(hdr, depsHdr...)
+		}
+	}
 	if mt, traceOnly := c.isMsgTraceEnabled(); mt != nil {
 		// If message is delivered, we need to disable the message trace headers
 		// to prevent a trace event to be generated when a stored message
@@ -6338,6 +6352,40 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 	// Store actual msg.
 	if lseq == 0 && ts == 0 {
 		seq, ts, err = store.StoreMsg(subject, hdr, msg, ttl)
+
+		if err == nil && mset.cfg.CheckMessageDependencies {
+			sourceStream, srcErr := getSourceStreamName(hdr)
+			if srcErr != nil {
+				mset.srv.Errorf("Failed to get source stream name in stream '%s' for subject '%s': %v", mset.cfg.Name, subject, srcErr)
+			} else {
+				mset.increaseSourceStreamMsgCount(sourceStream)
+			}
+
+			mset.srv.Debugf("Stored message in stream '%s' for subject '%s' from '%s', delayed messages %d, source stream messages: %v", mset.cfg.Name, subject, sourceStream, len(mset.delayedMsgs), mset.sourceStreamMsgCounts)
+
+			for {
+				dmsg := mset.nextResolvedMessage()
+				if dmsg == nil {
+					break
+				}
+
+				mset.srv.Debugf("Processing previously delayed message in stream '%s' for subject '%s' from '%s'", mset.cfg.Name, dmsg.subj, dmsg.source)
+				prevSeq, prevTs := seq, ts
+				seq, ts, err = store.StoreMsg(dmsg.subj, dmsg.hdr, dmsg.msg, ttl)
+				if err != nil {
+					mset.srv.Errorf("Failed to store previously delayed message in stream '%s' for subject '%s' from '%s': %v", mset.cfg.Name, dmsg.subj, dmsg.source, err)
+					seq, ts = prevSeq, prevTs
+					err = nil // Reset so we don't fail the whole operation
+					break
+				}
+				mset.increaseSourceStreamMsgCount(dmsg.source)
+				mset.srv.Debugf("Successfully stored previously delayed message in stream '%s' for subject '%s' from '%s'", mset.cfg.Name, dmsg.subj, dmsg.source)
+
+				mset.delayedMsgs = slices.DeleteFunc(mset.delayedMsgs, func(dm *delayedJSMsg) bool {
+					return dm == dmsg
+				})
+			}
+		}
 	} else {
 		if mset.cfg.CheckMessageDependencies {
 			mset.srv.Warnf("Unexpected message store branch in stream '%s' for subject '%s'. This branch is not expected to be taken when message dependency checks are enabled.", mset.cfg.Name, subject)
