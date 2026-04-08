@@ -30,7 +30,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tiiuae/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nuid"
 	"github.com/tiiuae/nats-server/v2/server"

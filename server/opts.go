@@ -35,11 +35,11 @@ import (
 	"time"
 
 	"github.com/nats-io/jwt/v2"
+	"github.com/nats-io/nkeys"
+	"github.com/quic-go/quic-go"
 	"github.com/tiiuae/nats-server/v2/conf"
 	"github.com/tiiuae/nats-server/v2/server/certidp"
 	"github.com/tiiuae/nats-server/v2/server/certstore"
-	"github.com/nats-io/nkeys"
-	"github.com/quic-go/quic-go"
 )
 
 var allowUnknownTopLevelField = int32(0)

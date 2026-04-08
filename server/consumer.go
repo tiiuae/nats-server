@@ -32,9 +32,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/nats-io/nuid"
 	"github.com/tiiuae/nats-server/v2/server/avl"
 	"github.com/tiiuae/nats-server/v2/server/gsl"
-	"github.com/nats-io/nuid"
 	"golang.org/x/time/rate"
 )
 

@@ -31,8 +31,6 @@ import (
 	"time"
 
 	"github.com/nats-io/jwt/v2"
-	"github.com/tiiuae/nats-server/v2/logger"
-	"github.com/tiiuae/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	"github.com/nats-io/nuid"

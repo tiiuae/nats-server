@@ -45,10 +45,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/klauspost/compress/s2"
-	"github.com/tiiuae/nats-server/v2/server/ats"
-	"github.com/tiiuae/nats-server/v2/server/gsl"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nuid"
+	"github.com/tiiuae/nats-server/v2/server/ats"
+	"github.com/tiiuae/nats-server/v2/server/gsl"
 )
 
 func testFileStoreAllPermutations(t *testing.T, fn func(t *testing.T, fcfg FileStoreConfig)) {

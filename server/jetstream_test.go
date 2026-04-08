@@ -42,11 +42,11 @@ import (
 	"time"
 
 	"github.com/nats-io/jwt/v2"
-	"github.com/tiiuae/nats-server/v2/server/sysmem"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/nats-io/nkeys"
 	"github.com/nats-io/nuid"
+	"github.com/tiiuae/nats-server/v2/server/sysmem"
 )
 
 func TestJetStreamBasicNilConfig(t *testing.T) {
