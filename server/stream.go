@@ -5970,7 +5970,9 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 			if len(ss) != 0 {
 				_, _, sseq := streamAndSeq(string(ss))
 				if mset.lseq >= sseq {
-					mset.mu.Unlock()
+					if !needLock {
+						mset.mu.Unlock()
+					}
 					bumpCLFS()
 					if canRespond {
 						response := append(pubAck, strconv.FormatUint(sseq, 10)...)
