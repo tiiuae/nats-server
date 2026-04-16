@@ -3351,7 +3351,7 @@ func testMQTTConnectDisconnect(t *testing.T, o *Options, clientID string, clean 
 
 func TestMQTTClusterConnectDisconnectClean(t *testing.T) {
 	// The purpose of this test was to illustrate and verify
-	// https://github.com/nats-io/nats-server/pull/4734. Due to its timing
+	// https://github.com/tiiuae/nats-server/pull/4734. Due to its timing
 	// sensitivity it has never been 100% reliable, prone to flaking on an
 	// occasional MQTT Connect failure (API timeout?). Skip for now, to reduce
 	// the flaky noise.
@@ -3373,7 +3373,7 @@ func TestMQTTClusterConnectDisconnectClean(t *testing.T) {
 
 func TestMQTTClusterConnectDisconnectPersist(t *testing.T) {
 	// The purpose of this test was to illustrate and verify
-	// https://github.com/nats-io/nats-server/pull/4734. Due to its timing
+	// https://github.com/tiiuae/nats-server/pull/4734. Due to its timing
 	// sensitivity it has never been 100% reliable, prone to flaking on an
 	// occasional MQTT Connect failure (API timeout?). Skip for now, to reduce
 	// the flaky noise.
@@ -7783,7 +7783,7 @@ func testMQTTNewSubWithExistingTopLevelRetainedRace(t *testing.T, s *Server, o *
 	subc.Close()
 }
 
-// Issue https://github.com/nats-io/nats-server/issues/3924
+// Issue https://github.com/tiiuae/nats-server/issues/3924
 // The MQTT Server MUST NOT match Topic Filters starting with a wildcard character (# or +),
 // with Topic Names beginning with a $ character [MQTT-4.7.2-1]
 func TestMQTTSubjectWildcardStart(t *testing.T) {
@@ -7949,7 +7949,7 @@ func TestMQTTTopicWithDot(t *testing.T) {
 	require_Equal(t, msg.Subject, "spBv1//0.plant2")
 }
 
-// Issue https://github.com/nats-io/nats-server/issues/4291
+// Issue https://github.com/tiiuae/nats-server/issues/4291
 func TestMQTTJetStreamRepublishAndQoS0Subscribers(t *testing.T) {
 	conf := createConfFile(t, []byte(fmt.Sprintf(`
 		listen: 127.0.0.1:-1

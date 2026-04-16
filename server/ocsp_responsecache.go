@@ -30,7 +30,7 @@ import (
 	"github.com/klauspost/compress/s2"
 	"golang.org/x/crypto/ocsp"
 
-	"github.com/nats-io/nats-server/v2/server/certidp"
+	"github.com/tiiuae/nats-server/v2/server/certidp"
 )
 
 const (

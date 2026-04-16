@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats-server/v2/server/gsl"
+	"github.com/tiiuae/nats-server/v2/server/gsl"
 	"github.com/nats-io/nuid"
 )
 
@@ -139,7 +139,7 @@ func TestMemStoreBytesLimit(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/4771
+// https://github.com/tiiuae/nats-server/issues/4771
 func TestMemStoreBytesLimitWithDiscardNew(t *testing.T) {
 	subj, msg := "tiny", make([]byte, 7)
 	storedMsgSize := memStoreMsgSize(subj, nil, msg)
@@ -835,7 +835,7 @@ func TestMemStoreDeleteBlocks(t *testing.T) {
 	require_True(t, dmap.Size() == state.NumDeleted)
 }
 
-// https://github.com/nats-io/nats-server/issues/4850
+// https://github.com/tiiuae/nats-server/issues/4850
 func TestMemStoreGetSeqFromTimeWithLastDeleted(t *testing.T) {
 	cfg := &StreamConfig{
 		Name:     "zzz",

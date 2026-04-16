@@ -1618,7 +1618,7 @@ func TestJetStreamClusterCreateConcurrentDurableConsumers(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/2144
+// https://github.com/tiiuae/nats-server/issues/2144
 func TestJetStreamClusterUpdateStreamToExisting(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "MSL", 3)
 	defer c.shutdown()
@@ -1759,7 +1759,7 @@ func TestJetStreamClusterCrossAccountInterop(t *testing.T) {
 	})
 }
 
-// https://github.com/nats-io/nats-server/issues/2242
+// https://github.com/tiiuae/nats-server/issues/2242
 func TestJetStreamClusterMsgIdDuplicateBug(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "MSL", 3)
 	defer c.shutdown()
@@ -5005,7 +5005,7 @@ func TestJetStreamClusterConsumerLeaderChangeDeadlock(t *testing.T) {
 
 // We were compacting to keep the raft log manageable but not snapshotting, which meant that restarted
 // servers could complain about no snapshot and could not sync after that condition.
-// Changes also address https://github.com/nats-io/nats-server/issues/2936
+// Changes also address https://github.com/tiiuae/nats-server/issues/2936
 func TestJetStreamClusterMemoryConsumerCompactVsSnapshot(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
@@ -5983,7 +5983,7 @@ func TestJetStreamClusterSameClusterLeafNodes(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/3178
+// https://github.com/tiiuae/nats-server/issues/3178
 func TestJetStreamClusterLeafNodeSPOFMigrateLeaders(t *testing.T) {
 	tmpl := strings.Replace(jsClusterTempl, "store_dir:", "domain: REMOTE, store_dir:", 1)
 	c := createJetStreamClusterWithTemplate(t, tmpl, "HUB", 2)
@@ -6068,7 +6068,7 @@ func TestJetStreamClusterLeafNodeSPOFMigrateLeaders(t *testing.T) {
 	})
 }
 
-// https://github.com/nats-io/nats-server/issues/3178
+// https://github.com/tiiuae/nats-server/issues/3178
 func TestJetStreamClusterLeafNodeSPOFMigrateLeadersWithMigrateDelay(t *testing.T) {
 	tmpl := strings.Replace(jsClusterTempl, "store_dir:", "domain: REMOTE, store_dir:", 1)
 	c := createJetStreamClusterWithTemplate(t, tmpl, "HUB", 2)
@@ -7499,7 +7499,7 @@ func TestJetStreamClusterCompressedStreamMessages(t *testing.T) {
 	checkMessagesAreCompressed()
 }
 
-// https://github.com/nats-io/nats-server/issues/5612
+// https://github.com/tiiuae/nats-server/issues/5612
 func TestJetStreamClusterWorkQueueLosingMessagesOnConsumerDelete(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3F", 3)
 	defer c.shutdown()

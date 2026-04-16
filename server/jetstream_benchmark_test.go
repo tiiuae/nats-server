@@ -31,7 +31,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats-server/v2/internal/fastrand"
+	"github.com/tiiuae/nats-server/v2/internal/fastrand"
 	"github.com/nats-io/nats.go"
 )
 
@@ -412,7 +412,7 @@ func BenchmarkJetStreamConsume(b *testing.B) {
 }
 
 // BenchmarkJetStreamConsumeFilteredContiguous verifies the fix in
-// https://github.com/nats-io/nats-server/pull/7015 and should
+// https://github.com/tiiuae/nats-server/pull/7015 and should
 // capture future regressions.
 func BenchmarkJetStreamConsumeFilteredContiguous(b *testing.B) {
 	clusterSizeCases := []struct {

@@ -39,8 +39,8 @@ import (
 	jwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats.go"
 
-	"github.com/nats-io/nats-server/v2/internal/fastrand"
-	"github.com/nats-io/nats-server/v2/internal/testhelper"
+	"github.com/tiiuae/nats-server/v2/internal/fastrand"
+	"github.com/tiiuae/nats-server/v2/internal/testhelper"
 )
 
 type captureLeafNodeRandomIPLogger struct {
@@ -9213,7 +9213,7 @@ func TestLeafNodeSlowConsumer(t *testing.T) {
 	t.Fatalf("Timed out waiting for slow consumer leafnodes, got: %v, expected: %v", got, expected)
 }
 
-// https://github.com/nats-io/nats-server/issues/4367
+// https://github.com/tiiuae/nats-server/issues/4367
 func TestLeafNodeDQMultiAccountExportImport(t *testing.T) {
 	bConf := createConfFile(t, []byte(`
 		listen: 127.0.0.1:-1
@@ -9288,7 +9288,7 @@ func TestLeafNodeDQMultiAccountExportImport(t *testing.T) {
 	require_Equal(t, got.Load(), 1)
 }
 
-// https://github.com/nats-io/nats-server/issues/4934
+// https://github.com/tiiuae/nats-server/issues/4934
 func TestLeafNodeServerReloadSubjectMappings(t *testing.T) {
 	stmpl := `
 		listen: 127.0.0.1:-1
@@ -9346,7 +9346,7 @@ func TestLeafNodeServerReloadSubjectMappings(t *testing.T) {
 	checkSubNoInterest(t, l, globalAccountName, "source1", 2*time.Second)
 }
 
-// https://github.com/nats-io/nats-server/issues/5099
+// https://github.com/tiiuae/nats-server/issues/5099
 func TestLeafNodeServerReloadSubjectMappingsWithSameSubject(t *testing.T) {
 	stmpl := `
 		listen: 127.0.0.1:-1
@@ -9465,7 +9465,7 @@ func TestLeafNodeAccountNkeysAuth(t *testing.T) {
 	checkLeafNodeConnected(t, l)
 }
 
-// https://github.com/nats-io/nats-server/issues/5117
+// https://github.com/tiiuae/nats-server/issues/5117
 func TestLeafNodeLoopDetectionOnActualLoop(t *testing.T) {
 	// Setup:  B --[leaf]--> A    C --[leaf]--> A    C --[leaf] --> B
 	accConf := `
@@ -9689,7 +9689,7 @@ func TestLeafNodeDetectsStaleConnectionIfNoInfo(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/5473
+// https://github.com/tiiuae/nats-server/issues/5473
 func TestLeafNodeDupeDeliveryQueueSubAndPlainSub(t *testing.T) {
 	clusterCommonConf := `
 		accounts: {
@@ -11706,7 +11706,7 @@ func TestLeafNodeConfigureWriteTimeoutPolicy(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/7441
+// https://github.com/tiiuae/nats-server/issues/7441
 func TestLeafNodesBasicTokenAuth(t *testing.T) {
 	hubConf := createConfFile(t, []byte(`
 		server_name: "HUB"

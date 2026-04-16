@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats-server/v2/server"
+	"github.com/tiiuae/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 )
 
@@ -206,7 +206,7 @@ func TestAccountCycleServiceNonCycleChain(t *testing.T) {
 	}
 }
 
-// bug: https://github.com/nats-io/nats-server/issues/1769
+// bug: https://github.com/tiiuae/nats-server/issues/1769
 func TestServiceImportReplyMatchCycle(t *testing.T) {
 	conf := createConfFile(t, []byte(`
 		port: -1
@@ -509,7 +509,7 @@ func TestAccountImportSubjectMapping(t *testing.T) {
 	}
 }
 
-// bug: https://github.com/nats-io/nats-server/issues/1789
+// bug: https://github.com/tiiuae/nats-server/issues/1789
 func TestAccountCycleWithRenaming(t *testing.T) {
 	conf := createConfFile(t, []byte(`
 		accounts {
@@ -544,7 +544,7 @@ func TestAccountCycleWithRenaming(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/5752
+// https://github.com/tiiuae/nats-server/issues/5752
 func TestAccountCycleFalsePositiveSubjectMapping(t *testing.T) {
 	conf := createConfFile(t, []byte(`
 		accounts {

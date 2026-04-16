@@ -37,8 +37,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/nats-io/nats-server/v2/internal/antithesis"
-	srvlog "github.com/nats-io/nats-server/v2/logger"
+	"github.com/tiiuae/nats-server/v2/internal/antithesis"
+	srvlog "github.com/tiiuae/nats-server/v2/logger"
 )
 
 func checkForErr(totalWait, sleepDur time.Duration, f func() error) error {
@@ -2203,7 +2203,7 @@ func TestServerRateLimitLogging(t *testing.T) {
 	checkLog(c1, c2)
 }
 
-// https://github.com/nats-io/nats-server/discussions/4535
+// https://github.com/tiiuae/nats-server/discussions/4535
 func TestServerAuthBlockAndSysAccounts(t *testing.T) {
 	conf := createConfFile(t, []byte(`
 		listen: 127.0.0.1:-1
@@ -2229,7 +2229,7 @@ func TestServerAuthBlockAndSysAccounts(t *testing.T) {
 	require_Error(t, err, nats.ErrAuthorization, errors.New("nats: Authorization Violation"))
 }
 
-// https://github.com/nats-io/nats-server/issues/5396
+// https://github.com/tiiuae/nats-server/issues/5396
 func TestServerConfigLastLineComments(t *testing.T) {
 	conf := createConfFile(t, []byte(`
 	{

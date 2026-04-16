@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats-server/v2/server/gsl"
+	"github.com/tiiuae/nats-server/v2/server/gsl"
 )
 
 // Print Results: go test -v  --args --results
@@ -869,7 +869,7 @@ func TestSubjectTreeNode48(t *testing.T) {
 	require_True(t, gotC)
 
 	// Check for off-by-one on byte 255 as found by staticcheck, see
-	// https://github.com/nats-io/nats-server/pull/5826.
+	// https://github.com/tiiuae/nats-server/pull/5826.
 	n.addChild(255, &c)
 	require_Equal(t, n.key[255], 3)
 	grown := n.grow().(*node256)

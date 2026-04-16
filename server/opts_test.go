@@ -31,7 +31,7 @@ import (
 	"time"
 
 	"github.com/nats-io/jwt/v2"
-	"github.com/nats-io/nats-server/v2/conf"
+	"github.com/tiiuae/nats-server/v2/conf"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 )

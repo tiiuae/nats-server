@@ -42,7 +42,7 @@ import (
 	"time"
 
 	"github.com/nats-io/jwt/v2"
-	"github.com/nats-io/nats-server/v2/server/sysmem"
+	"github.com/tiiuae/nats-server/v2/server/sysmem"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/nats-io/nkeys"
@@ -4117,7 +4117,7 @@ func TestJetStreamRedeliverAndLateAck(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/1502
+// https://github.com/tiiuae/nats-server/issues/1502
 func TestJetStreamPendingNextTimer(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -8781,7 +8781,7 @@ func TestJetStreamAccountImportAll(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/1736
+// https://github.com/tiiuae/nats-server/issues/1736
 func TestJetStreamServerReload(t *testing.T) {
 	conf := createConfFile(t, []byte(fmt.Sprintf(`
 		listen: 127.0.0.1:-1
@@ -9093,7 +9093,7 @@ func TestJetStreamGetLastMsgBySubject(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/2329
+// https://github.com/tiiuae/nats-server/issues/2329
 func TestJetStreamGetLastMsgBySubjectAfterUpdate(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "JSC", 3)
 	defer c.shutdown()
@@ -10365,7 +10365,7 @@ func TestJetStreamDirectConsumersBeingReported(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/2290
+// https://github.com/tiiuae/nats-server/issues/2290
 func TestJetStreamTemplatedErrorsBug(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -15080,7 +15080,7 @@ func TestJetStreamAccountPurge(t *testing.T) {
 	inspectDirs(t, 0)
 }
 
-// For issue https://github.com/nats-io/nats-server/issues/3612
+// For issue https://github.com/tiiuae/nats-server/issues/3612
 // Do auto cleanup.
 func TestJetStreamDanglingMessageAutoCleanup(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
@@ -15150,7 +15150,7 @@ func TestJetStreamDanglingMessageAutoCleanup(t *testing.T) {
 	}
 }
 
-// Issue https://github.com/nats-io/nats-server/issues/3645
+// Issue https://github.com/tiiuae/nats-server/issues/3645
 func TestJetStreamMsgIDHeaderCollision(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -15203,7 +15203,7 @@ func TestJetStreamMsgIDHeaderCollision(t *testing.T) {
 	require_True(t, si.State.Msgs == 5)
 }
 
-// https://github.com/nats-io/nats-server/issues/3657
+// https://github.com/tiiuae/nats-server/issues/3657
 func TestJetStreamServerCrashOnPullConsumerDeleteWithInactiveThresholdAfterAck(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -15605,7 +15605,7 @@ func TestJetStreamMetaDataFailOnKernelFault(t *testing.T) {
 	require_True(t, si.State.Msgs == 10)
 }
 
-// https://github.com/nats-io/nats-server/issues/3734
+// https://github.com/tiiuae/nats-server/issues/3734
 func TestJetStreamMsgBlkFailOnKernelFault(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -16126,7 +16126,7 @@ func TestJetStreamSnapshotRestoreStallAndHealthz(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/pull/4163
+// https://github.com/tiiuae/nats-server/pull/4163
 func TestJetStreamMaxBytesIgnored(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -16629,7 +16629,7 @@ func TestJetStreamUsageSyncDeadlock(t *testing.T) {
 }
 
 // https://github.com/nats-io/nats.go/issues/1382
-// https://github.com/nats-io/nats-server/issues/4445
+// https://github.com/tiiuae/nats-server/issues/4445
 func TestJetStreamChangeMaxMessagesPerSubject(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -17626,7 +17626,7 @@ func TestJetStreamDirectGetMultiPaging(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/4878
+// https://github.com/tiiuae/nats-server/issues/4878
 func TestJetStreamInterestStreamConsumerFilterEdit(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -17677,7 +17677,7 @@ func TestJetStreamInterestStreamConsumerFilterEdit(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/5383
+// https://github.com/tiiuae/nats-server/issues/5383
 func TestJetStreamInterestStreamWithFilterSubjectsConsumer(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -17945,7 +17945,7 @@ func TestJetStreamAuditStreams(t *testing.T) {
 	require_NoError(t, err)
 }
 
-// https://github.com/nats-io/nats-server/issues/5570
+// https://github.com/tiiuae/nats-server/issues/5570
 func TestJetStreamBadSubjectMappingStream(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -19428,7 +19428,7 @@ func TestJetStreamSubjectDeleteMarkersWithMirror(t *testing.T) {
 	require_Error(t, err)
 }
 
-// https://github.com/nats-io/nats-server/issues/6538
+// https://github.com/tiiuae/nats-server/issues/6538
 func TestJetStreamInterestMaxDeliveryReached(t *testing.T) {
 	maxWait := 250 * time.Millisecond
 	for _, useNak := range []bool{true, false} {
@@ -19533,7 +19533,7 @@ func TestJetStreamInterestMaxDeliveryReached(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/7817
+// https://github.com/tiiuae/nats-server/issues/7817
 func TestJetStreamWQMaxDeliveryReached(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
@@ -19606,7 +19606,7 @@ func TestJetStreamWQMaxDeliveryReached(t *testing.T) {
 	require_Equal(t, sm.subj, "foo")
 }
 
-// https://github.com/nats-io/nats-server/issues/6874
+// https://github.com/tiiuae/nats-server/issues/6874
 func TestJetStreamMaxDeliveryRedeliveredReporting(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -22501,7 +22501,7 @@ func TestJetStreamReloadMetaCompact(t *testing.T) {
 	require_Equal(t, s.getOpts().JetStreamMetaCompact, 0)
 }
 
-// https://github.com/nats-io/nats-server/issues/7511
+// https://github.com/tiiuae/nats-server/issues/7511
 func TestJetStreamImplicitRePublishAfterSubjectTransform(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -22685,7 +22685,7 @@ func TestJetStreamSourceConfigValidation(t *testing.T) {
 	require_Equal(t, string(response.Data), `{"type":"io.nats.jetstream.api.v1.stream_create_response","error":{"code":400,"err_code":10141,"description":"sourced stream name is invalid"}}`)
 }
 
-// https://github.com/nats-io/nats-server/issues/6747
+// https://github.com/tiiuae/nats-server/issues/6747
 func TestJetStreamCleanupNoInterestAboveThreshold(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()

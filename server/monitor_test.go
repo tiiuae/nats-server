@@ -252,7 +252,7 @@ func pollVarz(t *testing.T, s *Server, mode int, url string, opts *VarzOptions) 
 	return v
 }
 
-// https://github.com/nats-io/nats-server/issues/2170
+// https://github.com/tiiuae/nats-server/issues/2170
 // Just the ever increasing subs part.
 func TestMonitorVarzSubscriptionsResetProperly(t *testing.T) {
 	// Run with JS to create a bunch of subs to start.
@@ -5493,7 +5493,7 @@ func TestMonitorReloadTLSConfig(t *testing.T) {
 			ca_file: '../test/configs/certs/ca.pem'
 
 			# Set this to make sure that it does not impact secure monitoring
-			# (which it did, see issue: https://github.com/nats-io/nats-server/issues/2980)
+			# (which it did, see issue: https://github.com/tiiuae/nats-server/issues/2980)
 			verify_and_map: true
 		}
 	`
@@ -6106,7 +6106,7 @@ func TestMonitorConnzIncludesLeafnodes(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/4144
+// https://github.com/tiiuae/nats-server/issues/4144
 func TestMonitorAccountszMappingOrderReporting(t *testing.T) {
 	conf := createConfFile(t, []byte(`
 	listen: 127.0.0.1:-1
@@ -6471,7 +6471,7 @@ func TestServerHealthz(t *testing.T) {
 // See the License for the specific language governing permissions and
 // limitations under the License.
 // Make sure that we do not run the http server for monitoring unless asked.
-// https://github.com/nats-io/nats-server/issues/2170
+// https://github.com/tiiuae/nats-server/issues/2170
 // Just the ever increasing subs part.
 // Helper to map to connection name
 // getConnsIdleDurations returns a slice of parsed idle durations from a connection info slice.
@@ -6485,7 +6485,7 @@ func TestServerHealthz(t *testing.T) {
 // Create a connection to test ConnInfo
 // Benchmark our Connz generation. Don't use HTTP here, just measure server endpoint.
 // Helper function to check that a JS cluster is formed
-// https://github.com/nats-io/nats-server/issues/4144
+// https://github.com/tiiuae/nats-server/issues/4144
 // createCallbackURL adds a callback query parameter for JSONP requests.
 // stripCallback removes the JSONP callback function from the response.
 // Returns the JSON body without the wrapping callback function.

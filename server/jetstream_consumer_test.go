@@ -2620,7 +2620,7 @@ func Benchmark____JetStreamConsumerIsFilteredMatch(b *testing.B) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/6085
+// https://github.com/tiiuae/nats-server/issues/6085
 func TestJetStreamConsumerBackoffNotRespectedWithMultipleInflightRedeliveries(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -9642,7 +9642,7 @@ func TestJetStreamConsumerPullMaxBytes(t *testing.T) {
 	checkSubsPending(t, sub, 0)
 }
 
-// https://github.com/nats-io/nats-server/issues/6824
+// https://github.com/tiiuae/nats-server/issues/6824
 func TestJetStreamConsumerDeliverAllOverlappingFilterSubjects(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -9697,7 +9697,7 @@ func TestJetStreamConsumerDeliverAllOverlappingFilterSubjects(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/6844
+// https://github.com/tiiuae/nats-server/issues/6844
 func TestJetStreamConsumerDeliverAllNonOverlappingFilterSubjects(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -9733,7 +9733,7 @@ func TestJetStreamConsumerDeliverAllNonOverlappingFilterSubjects(t *testing.T) {
 	require_Equal(t, i.NumPending, 0)
 }
 
-// https://github.com/nats-io/nats-server/issues/7336
+// https://github.com/tiiuae/nats-server/issues/7336
 func TestJetStreamConsumerDeliverPartialOverlappingFilterSubjects(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -10441,7 +10441,7 @@ func TestJetStreamConsumerMaxDeliverUnderflow(t *testing.T) {
 	require_Equal(t, maxdc, 0)
 }
 
-// https://github.com/nats-io/nats-server/issues/7457
+// https://github.com/tiiuae/nats-server/issues/7457
 func TestJetStreamConsumerNoWaitNoMessagesOnEos(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -10481,7 +10481,7 @@ func TestJetStreamConsumerNoWaitNoMessagesOnEos(t *testing.T) {
 	require_Equal(t, msg.Header.Get("Description"), "No Messages")
 }
 
-// https://github.com/nats-io/nats-server/issues/5373
+// https://github.com/tiiuae/nats-server/issues/5373
 func TestJetStreamConsumerNoWaitNoMessagesOnEosWithDeliveredMsgs(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -10795,7 +10795,7 @@ func TestJetStreamConsumerCheckNumPending(t *testing.T) {
 	require_Equal(t, np, 1)
 }
 
-// https://github.com/nats-io/nats-server/issues/7779
+// https://github.com/tiiuae/nats-server/issues/7779
 func TestJetStreamConsumerAllowOverlappingSubjectsIfNotSubset(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -10863,7 +10863,7 @@ func TestJetStreamConsumerAllowOverlappingSubjectsIfNotSubset(t *testing.T) {
 	require_Len(t, len(msgs), count)
 }
 
-// https://github.com/nats-io/nats-server/issues/7847
+// https://github.com/tiiuae/nats-server/issues/7847
 func TestJetStreamConsumerLegacyDurableCreateSetsConsumerName(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -10907,7 +10907,7 @@ func TestJetStreamConsumerLegacyDurableCreateSetsConsumerName(t *testing.T) {
 	require_Equal(t, resp.Config.Name, "CONSUMER")
 }
 
-// https://github.com/nats-io/nats-server/issues/7852
+// https://github.com/tiiuae/nats-server/issues/7852
 func TestJetStreamConsumerSingleFilterSubjectInFilterSubjects(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()

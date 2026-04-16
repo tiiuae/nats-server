@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats-server/v2/internal/antithesis"
+	"github.com/tiiuae/nats-server/v2/internal/antithesis"
 )
 
 // DefaultTestOptions are default options for the unit tests.

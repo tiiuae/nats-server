@@ -59,7 +59,7 @@ func (s *Server) processClientOrLeafCallout(c *client, opts *Options, proxyRequi
 		acc = c.acc
 	}
 	if acc == nil {
-		// FIX for https://github.com/nats-io/nats-server/issues/7841
+		// FIX for https://github.com/tiiuae/nats-server/issues/7841
 		// hand rolled creds on leafnode became crasher here
 		errStr = fmt.Sprintf("%s not mapped to a callout account", c.kindString())
 		s.Warnf(errStr)

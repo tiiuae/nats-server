@@ -14,13 +14,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
-          path: src/github.com/nats-io/nats-server
+          path: src/github.com/tiiuae/nats-server
 
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
           go-version: stable
-          cache-dependency-path: src/github.com/nats-io/nats-server/go.sum
+          cache-dependency-path: src/github.com/tiiuae/nats-server/go.sum
 
       - name: Set up testing tools and environment
         shell: bash --noprofile --norc -eo pipefail {0}
@@ -33,19 +33,19 @@ jobs:
       - name: Run tests (3 times to detect flappers)
         shell: bash --noprofile --norc -eo pipefail {0}
         run: |
-          cd src/github.com/nats-io/nats-server
+          cd src/github.com/tiiuae/nats-server
           go test -v --count=3 --run='TestXMQTT' ./server
 
       - name: Run tests with --race
         shell: bash --noprofile --norc -eo pipefail {0}
         run: |
-          cd src/github.com/nats-io/nats-server
+          cd src/github.com/tiiuae/nats-server
           go test -v --race --failfast --run='TestXMQTT' ./server
 
       - name: Run benchmarks
         shell: bash --noprofile --norc -eo pipefail {0}
         run: |
-          cd src/github.com/nats-io/nats-server
+          cd src/github.com/tiiuae/nats-server
           go test --run='-' --count=3 --bench 'BenchmarkXMQTT' --benchtime=100x ./server
 
       # TODO: compare benchmarks

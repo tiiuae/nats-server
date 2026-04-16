@@ -17,7 +17,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nats-io/nats-server/v2/internal/antithesis"
+	"github.com/tiiuae/nats-server/v2/internal/antithesis"
 )
 
 func TestGenericSublistInit(t *testing.T) {

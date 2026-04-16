@@ -42,12 +42,12 @@ import (
 
 	"github.com/klauspost/compress/s2"
 	"github.com/minio/highwayhash"
-	"github.com/nats-io/nats-server/v2/server/ats"
-	"github.com/nats-io/nats-server/v2/server/avl"
-	"github.com/nats-io/nats-server/v2/server/elastic"
-	"github.com/nats-io/nats-server/v2/server/gsl"
-	"github.com/nats-io/nats-server/v2/server/stree"
-	"github.com/nats-io/nats-server/v2/server/thw"
+	"github.com/tiiuae/nats-server/v2/server/ats"
+	"github.com/tiiuae/nats-server/v2/server/avl"
+	"github.com/tiiuae/nats-server/v2/server/elastic"
+	"github.com/tiiuae/nats-server/v2/server/gsl"
+	"github.com/tiiuae/nats-server/v2/server/stree"
+	"github.com/tiiuae/nats-server/v2/server/thw"
 	"golang.org/x/crypto/chacha20"
 	"golang.org/x/crypto/chacha20poly1305"
 )
@@ -9136,7 +9136,7 @@ func (fs *fileStore) PurgeEx(subject string, sequence, keep uint64) (purged uint
 	}
 
 	// We may remove blocks as we purge, so don't range directly on fs.blks
-	// otherwise we may jump over some (see https://github.com/nats-io/nats-server/issues/3528)
+	// otherwise we may jump over some (see https://github.com/tiiuae/nats-server/issues/3528)
 	for i := 0; i < len(fs.blks); i++ {
 		mb := fs.blks[i]
 		// Skip if not within our range for the purge subject.
@@ -11900,7 +11900,7 @@ func (o *consumerFileStore) encryptState(buf []byte) ([]byte, error) {
 }
 
 // Used to limit number of disk IO calls in flight since they could all be blocking an OS thread.
-// https://github.com/nats-io/nats-server/issues/2742
+// https://github.com/tiiuae/nats-server/issues/2742
 var dios chan struct{}
 
 // Used to setup our simplistic counting semaphore using buffered channels.

@@ -45,8 +45,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/klauspost/compress/s2"
-	"github.com/nats-io/nats-server/v2/server/ats"
-	"github.com/nats-io/nats-server/v2/server/gsl"
+	"github.com/tiiuae/nats-server/v2/server/ats"
+	"github.com/tiiuae/nats-server/v2/server/gsl"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nuid"
 )
@@ -578,7 +578,7 @@ func TestFileStoreBytesLimit(t *testing.T) {
 	})
 }
 
-// https://github.com/nats-io/nats-server/issues/4771
+// https://github.com/tiiuae/nats-server/issues/4771
 func TestFileStoreBytesLimitWithDiscardNew(t *testing.T) {
 	subj, msg := "tiny", make([]byte, 7)
 	storedMsgSize := fileStoreMsgSize(subj, nil, msg)
@@ -2174,7 +2174,7 @@ func TestFileStoreWriteFailures(t *testing.T) {
 	// This test should be run inside an environment where this directory
 	// has a limited size.
 	// E.g. Docker
-	// docker run -ti --tmpfs /jswf_test:rw,size=32k --rm -v ~/Development/go/src:/go/src -w /go/src/github.com/nats-io/nats-server/ golang:1.21 /bin/bash
+	// docker run -ti --tmpfs /jswf_test:rw,size=32k --rm -v ~/Development/go/src:/go/src -w /go/src/github.com/tiiuae/nats-server/ golang:1.21 /bin/bash
 	tdir := filepath.Join("/", "jswf_test")
 	if stat, err := os.Stat(tdir); err != nil || !stat.IsDir() {
 		t.SkipNow()
@@ -3471,7 +3471,7 @@ func TestFileStoreFetchPerf(t *testing.T) {
 }
 
 // For things like raft log when we compact and have a message block that could reclaim > 50% of space for block we want to do that.
-// https://github.com/nats-io/nats-server/issues/2936
+// https://github.com/tiiuae/nats-server/issues/2936
 func TestFileStoreCompactReclaimHeadSpace(t *testing.T) {
 	testFileStoreAllPermutations(t, func(t *testing.T, fcfg FileStoreConfig) {
 		fcfg.BlockSize = 4 * 1024 * 1024
@@ -4094,7 +4094,7 @@ func TestFileStoreMaxMsgsPerSubject(t *testing.T) {
 	})
 }
 
-// Testing the case in https://github.com/nats-io/nats-server/issues/4247
+// Testing the case in https://github.com/tiiuae/nats-server/issues/4247
 func TestFileStoreMaxMsgsAndMaxMsgsPerSubject(t *testing.T) {
 	testFileStoreAllPermutations(t, func(t *testing.T, fcfg FileStoreConfig) {
 		fcfg.BlockSize = 128
@@ -4444,7 +4444,7 @@ func TestFileStoreFSSExpireNumPendingBug(t *testing.T) {
 	})
 }
 
-// https://github.com/nats-io/nats-server/issues/3484
+// https://github.com/tiiuae/nats-server/issues/3484
 func TestFileStoreFilteredFirstMatchingBug(t *testing.T) {
 	testFileStoreAllPermutations(t, func(t *testing.T, fcfg FileStoreConfig) {
 		cfg := StreamConfig{Name: "zzz", Subjects: []string{"foo.>"}, Storage: FileStorage}
@@ -5400,7 +5400,7 @@ func TestFileStoreSyncIntervals(t *testing.T) {
 	checkSyncFlag(false)
 }
 
-// https://github.com/nats-io/nats-server/issues/4529
+// https://github.com/tiiuae/nats-server/issues/4529
 // Run this wuth --race and you will see the unlocked access that probably caused this.
 func TestFileStoreRecalcFirstSequenceBug(t *testing.T) {
 	fcfg := FileStoreConfig{StoreDir: t.TempDir()}
@@ -6465,7 +6465,7 @@ func TestFileStoreIndexDBExistsAfterShutdown(t *testing.T) {
 	})
 }
 
-// https://github.com/nats-io/nats-server/issues/4842
+// https://github.com/tiiuae/nats-server/issues/4842
 func TestFileStoreSubjectCorruption(t *testing.T) {
 	sd, blkSize := t.TempDir(), uint64(2*1024*1024)
 	fs, err := newFileStore(
@@ -7021,7 +7021,7 @@ func TestFileStoreMultiLastSeqsMaxAllowed(t *testing.T) {
 	require_Error(t, err, ErrTooManyResults)
 }
 
-// https://github.com/nats-io/nats-server/issues/5236
+// https://github.com/tiiuae/nats-server/issues/5236
 // Unclear how the sequences get off here, this is just forcing the situation reported.
 func TestFileStoreMsgBlockFirstAndLastSeqCorrupt(t *testing.T) {
 	fs, err := newFileStore(
@@ -7682,7 +7682,7 @@ func TestFileStoreCheckSkipFirstBlockBug(t *testing.T) {
 	require_NoError(t, err)
 }
 
-// https://github.com/nats-io/nats-server/issues/5702
+// https://github.com/tiiuae/nats-server/issues/5702
 func TestFileStoreTombstoneRbytes(t *testing.T) {
 	fs, err := newFileStore(
 		FileStoreConfig{StoreDir: t.TempDir(), BlockSize: 1024},

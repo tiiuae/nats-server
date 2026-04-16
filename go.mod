@@ -1,10 +1,10 @@
-module github.com/nats-io/nats-server/v2
+module github.com/tiiuae/nats-server/v2
 
 go 1.25.0
 
 toolchain go1.25.9
 
-replace github.com/nats-io/nats.go => github.com/tiiuae/nats.go v0.0.0-20251002084734-c8c7f14015e6
+replace github.com/nats-io/nats.go => github.com/tiiuae/nats.go v0.0.0-20260416105712-bd2199d5cc10
 
 require (
 	github.com/antithesishq/antithesis-sdk-go v0.6.0-default-no-op

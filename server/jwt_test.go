@@ -6952,7 +6952,7 @@ func TestJWTAccountNATSResolverWrongCreds(t *testing.T) {
 	}
 }
 
-// Issue 5480: https://github.com/nats-io/nats-server/issues/5480
+// Issue 5480: https://github.com/tiiuae/nats-server/issues/5480
 func TestJWTImportsOnServerRestartAndClientsReconnect(t *testing.T) {
 	type namedCreds struct {
 		name  string

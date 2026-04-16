@@ -41,7 +41,7 @@ import (
 
 	"github.com/klauspost/compress/s2"
 	"github.com/nats-io/jwt/v2"
-	"github.com/nats-io/nats-server/v2/internal/fastrand"
+	"github.com/tiiuae/nats-server/v2/internal/fastrand"
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/quic-go/quic-go"
@@ -5982,7 +5982,7 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 					} else if dst == LEAF {
 						// We already have a LEAF and this is another one.
 						// Flip a coin to see if we swap it or not.
-						// See https://github.com/nats-io/nats-server/issues/6040
+						// See https://github.com/tiiuae/nats-server/issues/6040
 						if fastrand.Uint32()%2 == 1 {
 							rsub = sub
 						}
@@ -7135,7 +7135,7 @@ func (c *client) doTLSHandshake(typ string, solicit bool, url *url.URL, tlsConfi
 	if err = conn.Handshake(); err != nil {
 		if solicit {
 			// Based on type of error, possibly clear the saved tlsName
-			// See: https://github.com/nats-io/nats-server/issues/1256
+			// See: https://github.com/tiiuae/nats-server/issues/1256
 			// NOTE: As of Go 1.20, the HostnameError is wrapped so cannot
 			// type assert to check directly.
 			var hostnameErr x509.HostnameError

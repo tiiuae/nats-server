@@ -28,9 +28,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats-server/v2/server"
+	"github.com/tiiuae/nats-server/v2/server"
 
-	srvlog "github.com/nats-io/nats-server/v2/logger"
+	srvlog "github.com/tiiuae/nats-server/v2/logger"
 )
 
 // So we can pass tests and benchmarks..

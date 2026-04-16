@@ -34,7 +34,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/s2"
-	"github.com/nats-io/nats-server/v2/server/gsl"
+	"github.com/tiiuae/nats-server/v2/server/gsl"
 	"github.com/nats-io/nuid"
 )
 
@@ -8237,7 +8237,7 @@ func (a *Account) RestoreStream(ncfg *StreamConfig, r io.Reader) (*stream, error
 }
 
 // This is to check for dangling messages on interest retention streams. Only called on account enable.
-// Issue https://github.com/nats-io/nats-server/issues/3612
+// Issue https://github.com/tiiuae/nats-server/issues/3612
 func (mset *stream) checkForOrphanMsgs() {
 	mset.mu.RLock()
 	consumers := make([]*consumer, 0, len(mset.consumers))

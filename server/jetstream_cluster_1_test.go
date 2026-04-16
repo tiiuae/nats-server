@@ -2175,7 +2175,7 @@ func TestJetStreamClusterInterestRetention(t *testing.T) {
 	waitForZero()
 }
 
-// https://github.com/nats-io/nats-server/issues/2243
+// https://github.com/tiiuae/nats-server/issues/2243
 func TestJetStreamClusterWorkQueueRetention(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
@@ -7882,7 +7882,7 @@ func TestJetStreamClusterConsumerHealthCheckOnlyReportsSkew(t *testing.T) {
 	require_NotEqual(t, node.State(), Closed)
 }
 
-// https://github.com/nats-io/nats-server/issues/7149
+// https://github.com/tiiuae/nats-server/issues/7149
 func TestJetStreamClusterConsumerHealthCheckDeleted(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()

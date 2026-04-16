@@ -210,7 +210,7 @@ Setup:
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/5071
+// https://github.com/tiiuae/nats-server/issues/5071
 func TestJetStreamClusterStreamPlacementDistribution(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 5)
 	defer c.shutdown()
@@ -897,7 +897,7 @@ func TestJetStreamClusterConsumerNRGCleanup(t *testing.T) {
 	})
 }
 
-// https://github.com/nats-io/nats-server/issues/4878
+// https://github.com/tiiuae/nats-server/issues/4878
 func TestClusteredInterestConsumerFilterEdit(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
@@ -1708,7 +1708,7 @@ func TestJetStreamClusterBusyStreams(t *testing.T) {
 	})
 }
 
-// https://github.com/nats-io/nats-server/issues/5488
+// https://github.com/tiiuae/nats-server/issues/5488
 func TestJetStreamClusterSingleMaxConsumerUpdate(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
@@ -1866,7 +1866,7 @@ func TestJetStreamClusterAckFloorBetweenLeaderAndFollowers(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/pull/5600
+// https://github.com/tiiuae/nats-server/pull/5600
 func TestJetStreamClusterConsumerLeak(t *testing.T) {
 	N := 2000 // runs in under 10s, but significant enough to see the difference.
 	NConcurrent := 100
@@ -1975,7 +1975,7 @@ func TestJetStreamClusterConsumerLeak(t *testing.T) {
 	runtime.GC()
 	runtime.ReadMemStats(after)
 
-	// Before https://github.com/nats-io/nats-server/pull/5600 this test was
+	// Before https://github.com/tiiuae/nats-server/pull/5600 this test was
 	// adding 180Mb+ to HeapInuse. Now it's under 40Mb (ran locally on a Mac)
 	limit := before.HeapInuse + 100*1024*1024 // 100MB
 	if after.HeapInuse > before.HeapInuse+limit {

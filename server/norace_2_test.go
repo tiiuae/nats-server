@@ -37,7 +37,7 @@ import (
 
 	crand "crypto/rand"
 
-	"github.com/nats-io/nats-server/v2/server/gsl"
+	"github.com/tiiuae/nats-server/v2/server/gsl"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nuid"
 )
@@ -1977,7 +1977,7 @@ func TestNoRaceWQAndMultiSubjectFilters(t *testing.T) {
 	}
 }
 
-// https://github.com/nats-io/nats-server/issues/4957
+// https://github.com/tiiuae/nats-server/issues/4957
 func TestNoRaceWQAndMultiSubjectFiltersRace(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
