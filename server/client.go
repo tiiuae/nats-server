@@ -1823,7 +1823,14 @@ func (c *client) readDatagramLoop(pre []byte, unreliabilityOpts UnreliabilityOpt
 
 			c.Debugf("Received datagram video message from %q with length %d", senderId, len(rtpPacket))
 
-			header := fmt.Sprintf("LMSG %s.msg.video.%d %d%s", senderId, videoStreamId, len(rtpPacket), CR_LF)
+			var header string
+			senderParts := bytes.SplitN(senderId, []byte("."), 2)
+			if len(senderParts) == 2 {
+				// sub device
+				header = fmt.Sprintf("LMSG %s.msg-sub.%s.video.%d %d%s", senderParts[0], senderParts[1], videoStreamId, len(rtpPacket), CR_LF)
+			} else {
+				header = fmt.Sprintf("LMSG %s.msg.video.%d %d%s", senderId, videoStreamId, len(rtpPacket), CR_LF)
+			}
 			fullMsg = make([]byte, len(rtpPacket)+len(header)+LEN_CR_LF)
 			copy(fullMsg, header)
 			copy(fullMsg[len(header):], rtpPacket)
@@ -4175,50 +4182,51 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 func isVideoSubject(subject []byte) bool {
 	subjectStr := string(subject)
 	isVideoSubject := strings.Contains(subjectStr, ".msg.video.")
+	if !isVideoSubject {
+		parts := strings.Split(subjectStr, ".")
+		if len(parts) > 4 && parts[1] == "msg-sub" && parts[3] == "video" {
+			isVideoSubject = true
+		}
+	}
 	return isVideoSubject
 }
 
 // parseVideoSubject parses a subject of the form:
 //
-//	<senderId>.msg.video.<videoStreamId>
+// <senderID>.msg.video.<videoStreamID>
+// OR
+// <hostID>.msg-sub.<senderID>.video.<videoStreamID>
 //
 // and returns the senderId bytes slice (a view over the input) and the
 // video stream id as a byte. If the subject does not match this pattern
 // or the stream id is invalid/out of range, an error is returned.
 func parseVideoSubject(subject []byte) (senderID []byte, streamID byte, err error) {
-	const marker = ".msg.video."
-	// Find the marker within the subject.
-	idx := bytes.Index(subject, []byte(marker))
-	if idx < 0 {
-		return nil, 0, fmt.Errorf("video marker %q not found in subject", marker)
-	}
-	if idx == 0 {
-		return nil, 0, fmt.Errorf("missing sender id before %q", marker)
-	}
-	// Digits for the stream id follow the marker.
-	start := idx + len(marker)
-	if start >= len(subject) {
-		return nil, 0, fmt.Errorf("missing video stream id after %q", marker)
-	}
-	// Accept only the leading run of decimal digits.
-	nb := subject[start:]
-	end := 0
-	for end < len(nb) {
-		b := nb[end]
-		if b < '0' || b > '9' {
-			break
+	parts := bytes.Split(subject, []byte("."))
+	if len(parts) == 4 && bytes.Equal(parts[1], []byte("msg")) && bytes.Equal(parts[2], []byte("video")) {
+		// This matches the first pattern: <senderID>.msg.video.<videoStreamID>
+		senderID = parts[0]
+		streamIDBytes := parts[3]
+		u, perr := strconv.ParseUint(bytesToString(streamIDBytes), 10, 8)
+		if perr != nil {
+			return nil, 0, fmt.Errorf("invalid video stream id in subject: %v", perr)
 		}
-		end++
+		return senderID, byte(u), nil
 	}
-	if end == 0 {
-		return nil, 0, fmt.Errorf("invalid or empty video stream id in subject")
+
+	if len(parts) == 5 && bytes.Equal(parts[1], []byte("msg-sub")) && bytes.Equal(parts[3], []byte("video")) {
+		// This matches the second pattern: <hostID>.msg-sub.<senderID>.video.<videoStreamID>
+		// senderID will be <hostID>.<senderID>
+		senderID = bytes.Join([][]byte{parts[0], parts[2]}, []byte("."))
+		streamIDBytes := parts[4]
+		u, perr := strconv.ParseUint(bytesToString(streamIDBytes), 10, 8)
+		if perr != nil {
+			return nil, 0, fmt.Errorf("invalid video stream id in subject: %v", perr)
+		}
+		return senderID, byte(u), nil
 	}
-	// Parse as uint8
-	u, perr := strconv.ParseUint(bytesToString(nb[:end]), 10, 8)
-	if perr != nil {
-		return nil, 0, perr
-	}
-	return subject[:idx], byte(u), nil
+
+	// Subject does not match either pattern
+	return nil, 0, fmt.Errorf("subject does not match expected video patterns")
 }
 
 // Add the given sub's client to the list of clients that need flushing.
@@ -4444,7 +4452,6 @@ func isReservedReply(reply []byte) bool {
 
 // This will decide to call the client code or router code.
 func (c *client) processInboundMsg(msg []byte) {
-
 	switch c.kind {
 	case CLIENT:
 		c.processInboundClientMsg(msg)
