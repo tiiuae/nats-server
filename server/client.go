@@ -298,6 +298,7 @@ type client struct {
 	mperms     *msgDeny
 	darray     []string
 	pcd        map[*client]struct{}
+	pcdMu      sync.Mutex
 	atmr       *time.Timer
 	expires    time.Time
 	ping       pinfo
@@ -1408,7 +1409,9 @@ func (c *client) flushClients(budget time.Duration) time.Time {
 	// Check pending clients for flush.
 	for cp := range c.pcd {
 		// TODO(dlc) - Wonder if it makes more sense to create a new map?
+		c.pcdMu.Lock()
 		delete(c.pcd, cp)
+		c.pcdMu.Unlock()
 
 		// Queue up a flush for those in the set
 		cp.mu.Lock()
@@ -4574,10 +4577,12 @@ func parseVideoSubject(subject []byte) (senderID []byte, streamID byte, err erro
 // however, `client` lock must be held on entry. This holds true even
 // if `client` is same than `c`.
 func (c *client) addToPCD(client *client) {
+	c.pcdMu.Lock()
 	if _, ok := c.pcd[client]; !ok {
 		client.out.fsp++
 		c.pcd[client] = needFlush
 	}
+	c.pcdMu.Unlock()
 }
 
 // This will track a remote reply for an exported service that has requested
