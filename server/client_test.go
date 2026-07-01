@@ -4506,10 +4506,10 @@ func TestClientMsgsMetric(t *testing.T) {
 
 	checkClusterFormed(t, s1, s2)
 
-	ncS1 := natsConnect(t, s1.ClientURL(), nats.IgnoreDiscoveredServers())
+	ncS1 := natsConnect(t, s1.ClientURL(), nats.NoReconnect())
 	defer ncS1.Close()
 
-	ncS2 := natsConnect(t, s2.ClientURL(), nats.IgnoreDiscoveredServers())
+	ncS2 := natsConnect(t, s2.ClientURL(), nats.NoReconnect())
 	defer ncS2.Close()
 
 	// Echo the message back

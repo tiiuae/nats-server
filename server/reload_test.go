@@ -270,20 +270,22 @@ func TestConfigReload(t *testing.T) {
 	loaded := server.ConfigTime()
 
 	golden := &Options{
-		ConfigFile:     config,
-		Host:           "0.0.0.0",
-		Port:           2233,
-		AuthTimeout:    float64(AUTH_TIMEOUT / time.Second),
-		Debug:          false,
-		Trace:          false,
-		NoLog:          true,
-		Logtime:        false,
-		MaxControlLine: 4096,
-		MaxPayload:     1048576,
-		MaxConn:        65536,
-		PingInterval:   2 * time.Minute,
-		MaxPingsOut:    2,
-		WriteDeadline:  10 * time.Second,
+		ConfigFile:                config,
+		Host:                      "0.0.0.0",
+		Port:                      2233,
+		AuthTimeout:               float64(AUTH_TIMEOUT / time.Second),
+		Debug:                     false,
+		Trace:                     false,
+		NoLog:                     true,
+		Logtime:                   false,
+		MaxControlLine:            4096,
+		MaxPayload:                1048576,
+		MaxConn:                   65536,
+		PingInterval:              2 * time.Minute,
+		ConsumerHeartbeatInterval: 1 * time.Second,
+		ConsumerInactiveThreshold: 10 * time.Second,
+		MaxPingsOut:               2,
+		WriteDeadline:             10 * time.Second,
 		Cluster: ClusterOpts{
 			Name: "abc",
 			Host: "127.0.0.1",
@@ -366,6 +368,12 @@ func TestConfigReload(t *testing.T) {
 	}
 	if updated.PingInterval != 5*time.Second {
 		t.Fatalf("PingInterval is incorrect.\nexpected 5s\ngot: %s", updated.PingInterval)
+	}
+	if updated.ConsumerHeartbeatInterval != 5*time.Second {
+		t.Fatalf("ConsumerHeartbeatInterval is incorrect.\nexpected 5s\ngot: %s", updated.ConsumerHeartbeatInterval)
+	}
+	if updated.ConsumerInactiveThreshold != 5*time.Second {
+		t.Fatalf("ConsumerInactiveThreshold is incorrect.\nexpected 5s\ngot: %s", updated.ConsumerInactiveThreshold)
 	}
 	if updated.MaxPingsOut != 1 {
 		t.Fatalf("MaxPingsOut is incorrect.\nexpected 1\ngot: %d", updated.MaxPingsOut)

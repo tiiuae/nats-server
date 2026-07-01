@@ -115,7 +115,8 @@ type Account struct {
 	traceDestSampling int
 	// Guarantee that only one goroutine can be running either checkJetStreamMigrate
 	// or clearObserverState at a given time for this account to prevent interleaving.
-	jscmMu sync.Mutex
+	jscmMu          sync.Mutex
+	rtpPacketBuffer *RetransmissionBufferStore
 }
 
 const (
@@ -272,9 +273,10 @@ type importMap struct {
 // NewAccount creates a new unlimited account with the given name.
 func NewAccount(name string) *Account {
 	a := &Account{
-		Name:     name,
-		limits:   limits{-1, -1, -1, -1, false},
-		eventIds: nuid.New(),
+		Name:            name,
+		limits:          limits{-1, -1, -1, -1, false},
+		eventIds:        nuid.New(),
+		rtpPacketBuffer: NewRetransmissionBufferStore(),
 	}
 	return a
 }
