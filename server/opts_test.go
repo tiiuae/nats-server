@@ -1377,6 +1377,28 @@ func TestPingIntervalNew(t *testing.T) {
 	}
 }
 
+func TestConsumerHeartbeatInterval(t *testing.T) {
+	conf := createConfFile(t, []byte(`consumer_heartbeat_interval: "6m"`))
+	opts := &Options{}
+	if err := opts.ProcessConfigFile(conf); err != nil {
+		t.Fatalf("expected no error")
+	}
+	if opts.ConsumerHeartbeatInterval != 6*time.Minute {
+		t.Fatalf("expected consumer heartbeat interval to be 6 minutes")
+	}
+}
+
+func TestConsumerInactiveThreshold(t *testing.T) {
+	conf := createConfFile(t, []byte(`consumer_inactive_threshold: "7m"`))
+	opts := &Options{}
+	if err := opts.ProcessConfigFile(conf); err != nil {
+		t.Fatalf("expected no error")
+	}
+	if opts.ConsumerInactiveThreshold != 7*time.Minute {
+		t.Fatalf("expected consumer inactive threshold to be 7 minutes")
+	}
+}
+
 func TestOptionsProcessConfigFile(t *testing.T) {
 	// Create options with default values of Debug and Trace
 	// that are the opposite of what is in the config file.

@@ -23269,3 +23269,192 @@ func TestJetStreamSourcingIntoDiscardNewPerSubject(t *testing.T) {
 	require_Equal(t, string(msgp.Data), "1")
 
 }
+
+func getMessageDependencyStreamConfig(name, prefix, dep string) *nats.StreamConfig {
+	return &nats.StreamConfig{
+		Name:                       name,
+		Storage:                    nats.MemoryStorage,
+		MessageDependenciesEnabled: true,
+		MessageDependencyStreams:   []string{dep},
+		Subjects:                   []string{fmt.Sprintf("%s.>", prefix)},
+	}
+}
+
+func TestJetStreamMessageDependencyConfig(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	streamOneName := "STREAM-ONE"
+	streamOneSubjectPrefix := "stream.one"
+	streamTwoName := "STREAM-TWO"
+	streamTwoSubjectPrefix := "stream.two"
+	streamAggregateName := "STREAM-AGGREGATE"
+
+	getAggregateConfig := func(sources ...string) *nats.StreamConfig {
+		var sArr []*nats.StreamSource
+		for _, s := range sources {
+			sArr = append(sArr, &nats.StreamSource{Name: s})
+		}
+
+		return &nats.StreamConfig{
+			Name:                     streamAggregateName,
+			Storage:                  nats.FileStorage,
+			CheckMessageDependencies: true,
+			Sources:                  sArr,
+		}
+	}
+
+	_, err := js.AddStream(getMessageDependencyStreamConfig(streamOneName, streamOneSubjectPrefix, streamTwoName))
+	require_NoError(t, err)
+
+	_, err = js.AddStream(getMessageDependencyStreamConfig(streamTwoName, streamTwoSubjectPrefix, streamOneName))
+	require_NoError(t, err)
+
+	_, err = js.AddStream(getAggregateConfig(streamOneName))
+	require_NotNil(t, err)
+	require_Equal(t, err.Error(), "nats: CheckMessageDependencies is allowed only when MemoryStorage is used")
+}
+
+func TestJetStreamMessageDependencyHeaders(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	streamOneName := "STREAM-ONE"
+	streamOneSubjectPrefix := "stream.one"
+	streamTwoName := "STREAM-TWO"
+	streamTwoSubjectPrefix := "stream.two"
+
+	publishToStream := func(prefix, suffix string) string {
+		subj := fmt.Sprintf("%s.%s", prefix, suffix)
+		_, err := js.Publish(subj, nil)
+		require_NoError(t, err)
+		return subj
+	}
+
+	_, err := js.AddStream(getMessageDependencyStreamConfig(streamOneName, streamOneSubjectPrefix, streamTwoName))
+	require_NoError(t, err)
+
+	_, err = js.AddStream(getMessageDependencyStreamConfig(streamTwoName, streamTwoSubjectPrefix, streamOneName))
+	require_NoError(t, err)
+
+	streamOneMsg01 := publishToStream(streamOneSubjectPrefix, "01")
+	streamTwoMsg01 := publishToStream(streamTwoSubjectPrefix, "02")
+	streamOneMsg02 := publishToStream(streamOneSubjectPrefix, "03")
+
+	subOne, err := js.SubscribeSync(fmt.Sprintf("%s.>", streamOneSubjectPrefix))
+	require_NoError(t, err)
+
+	subTwo, err := js.SubscribeSync(fmt.Sprintf("%s.>", streamTwoSubjectPrefix))
+	require_NoError(t, err)
+
+	msg, err := subOne.NextMsg(time.Second)
+	require_NoError(t, err)
+	require_Equal(t, msg.Subject, streamOneMsg01)
+	require_Equal(t, msg.Header.Get("MSG-DEPS"), "{}")
+
+	msg, err = subOne.NextMsg(time.Second)
+	require_NoError(t, err)
+	require_Equal(t, msg.Subject, streamOneMsg02)
+	require_Equal(t, msg.Header.Get("MSG-DEPS"), "{\"STREAM-TWO\":1}")
+
+	msg, err = subTwo.NextMsg(time.Second)
+	require_NoError(t, err)
+	require_Equal(t, msg.Subject, streamTwoMsg01)
+	require_Equal(t, msg.Header.Get("MSG-DEPS"), "{\"STREAM-ONE\":1}")
+}
+
+func TestJetStreamMessageDependencyChecks(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	streamOneName := "STREAM-ONE"
+	streamOneSubjectPrefix := "stream.one"
+	streamTwoName := "STREAM-TWO"
+	streamTwoSubjectPrefix := "stream.two"
+	streamAggregateName := "STREAM-AGGREGATE"
+
+	publishToStream := func(prefix, suffix string) string {
+		subj := fmt.Sprintf("%s.%s", prefix, suffix)
+		_, err := js.Publish(subj, nil)
+		require_NoError(t, err)
+		return subj
+	}
+
+	getAggregateMsgs := func() ([]string, error) {
+		sub, err := js.PullSubscribe(">", "", nats.BindStream(streamAggregateName), nats.DeliverAll())
+		if err != nil {
+			return nil, err
+		}
+		defer sub.Unsubscribe()
+
+		var subs []string
+		for {
+			msgs, err := sub.Fetch(10, nats.MaxWait(time.Second))
+			if err != nil {
+				if errors.Is(err, nats.ErrTimeout) {
+					break
+				}
+				return nil, err
+			}
+			for _, msg := range msgs {
+				subs = append(subs, msg.Subject)
+			}
+		}
+		return subs, nil
+	}
+
+	getAggregateConfig := func(sources ...string) *nats.StreamConfig {
+		var sArr []*nats.StreamSource
+		for _, s := range sources {
+			sArr = append(sArr, &nats.StreamSource{Name: s})
+		}
+
+		return &nats.StreamConfig{
+			Name:                     streamAggregateName,
+			Storage:                  nats.MemoryStorage,
+			CheckMessageDependencies: true,
+			Sources:                  sArr,
+		}
+	}
+
+	_, err := js.AddStream(getMessageDependencyStreamConfig(streamOneName, streamOneSubjectPrefix, streamTwoName))
+	require_NoError(t, err)
+
+	_, err = js.AddStream(getMessageDependencyStreamConfig(streamTwoName, streamTwoSubjectPrefix, streamOneName))
+	require_NoError(t, err)
+
+	_ = publishToStream(streamOneSubjectPrefix, "01")
+	_ = publishToStream(streamTwoSubjectPrefix, "02")
+	_ = publishToStream(streamOneSubjectPrefix, "03")
+
+	_, err = js.AddStream(getAggregateConfig(streamOneName))
+	require_NoError(t, err)
+
+	// Wait for aggregate consumers to be created.
+	time.Sleep(time.Second)
+
+	msgsWithOneStream, err := getAggregateMsgs()
+	require_NoError(t, err)
+	require_Len(t, len(msgsWithOneStream), 1)
+	require_Equal(t, fmt.Sprintf("%v", msgsWithOneStream), "[stream.one.01]")
+
+	_, err = js.UpdateStream(getAggregateConfig(streamOneName, streamTwoName))
+	require_NoError(t, err)
+
+	// Wait for aggregate consumers to be created.
+	time.Sleep(time.Second)
+
+	msgsWithTwoStreams, err := getAggregateMsgs()
+	require_NoError(t, err)
+	require_Len(t, len(msgsWithTwoStreams), 3)
+	require_Equal(t, fmt.Sprintf("%v", msgsWithTwoStreams), "[stream.one.01 stream.two.02 stream.one.03]")
+}

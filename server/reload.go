@@ -671,6 +671,28 @@ func (p *pingIntervalOption) Apply(server *Server) {
 	server.Noticef("Reloaded: ping_interval = %s", p.newValue)
 }
 
+// consumerHeartbeatIntervalOption implements the option interface for the `consumer_heartbeat_interval`
+// setting.
+type consumerHeartbeatIntervalOption struct {
+	noopOption
+	newValue time.Duration
+}
+
+func (p *consumerHeartbeatIntervalOption) Apply(server *Server) {
+	server.Noticef("Reloaded: consumer_heartbeat_interval = %s", p.newValue)
+}
+
+// consumerInactiveThresholdOption implements the option interface for the `consumer_inactive_threshold`
+// setting.
+type consumerInactiveThresholdOption struct {
+	noopOption
+	newValue time.Duration
+}
+
+func (p *consumerInactiveThresholdOption) Apply(server *Server) {
+	server.Noticef("Reloaded: consumer_inactive_threshold = %s", p.newValue)
+}
+
 // maxPingsOutOption implements the option interface for the `ping_max`
 // setting.
 type maxPingsOutOption struct {
@@ -1287,7 +1309,7 @@ func imposeOrder(value any) error {
 		slices.Sort(value.AllowedOrigins)
 	case string, bool, uint8, uint16, uint64, int, int32, int64, time.Duration, float64, nil, LeafNodeOpts, ClusterOpts, *tls.Config, PinnedCertSet,
 		*URLAccResolver, *MemAccResolver, *DirAccResolver, *CacheDirAccResolver, Authentication, MQTTOpts, jwt.TagList,
-		*OCSPConfig, map[string]string, JSLimitOpts, StoreCipher, *OCSPResponseCacheConfig, *ProxiesConfig, WriteTimeoutPolicy:
+		*OCSPConfig, map[string]string, JSLimitOpts, StoreCipher, *OCSPResponseCacheConfig, *ProxiesConfig, WriteTimeoutPolicy, QUICOpts, UnreliabilityOpts:
 		// explicitly skipped types
 	case *AuthCallout:
 	case JSTpmOpts:
@@ -1438,6 +1460,10 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			diffOpts = append(diffOpts, &maxPayloadOption{newValue: newValue.(int32)})
 		case "pinginterval":
 			diffOpts = append(diffOpts, &pingIntervalOption{newValue: newValue.(time.Duration)})
+		case "consumerheartbeatinterval":
+			diffOpts = append(diffOpts, &consumerHeartbeatIntervalOption{newValue: newValue.(time.Duration)})
+		case "consumerinactivethreshold":
+			diffOpts = append(diffOpts, &consumerInactiveThresholdOption{newValue: newValue.(time.Duration)})
 		case "maxpingsout":
 			diffOpts = append(diffOpts, &maxPingsOutOption{newValue: newValue.(int)})
 		case "writedeadline":
@@ -1739,6 +1765,18 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			tmpNew.ConsumerReplicas = newValue.(MQTTOpts).ConsumerReplicas
 			tmpNew.ConsumerMemoryStorage = newValue.(MQTTOpts).ConsumerMemoryStorage
 			tmpNew.ConsumerInactiveThreshold = newValue.(MQTTOpts).ConsumerInactiveThreshold
+		case "quic":
+			// Similar to gateways
+			tmpOld := oldValue.(QUICOpts)
+			tmpNew := newValue.(QUICOpts)
+			tmpOld.TLSConfig, tmpOld.tlsConfigOpts, tmpOld.QUICConfig = nil, nil, nil
+			tmpNew.TLSConfig, tmpNew.tlsConfigOpts, tmpNew.QUICConfig = nil, nil, nil
+			// If there is really a change prevents reload.
+			if !reflect.DeepEqual(tmpOld, tmpNew) {
+				// See TODO(ik) note below about printing old/new values.
+				return nil, fmt.Errorf("config reload not supported for %s: old=%v, new=%v",
+					field.Name, oldValue, newValue)
+			}
 		case "connecterrorreports":
 			diffOpts = append(diffOpts, &connectErrorReports{newValue: newValue.(int)})
 		case "reconnecterrorreports":
@@ -1857,6 +1895,7 @@ func copyRemoteLNConfigForReloadCompare(current []*RemoteLeafOpts) []*RemoteLeaf
 		// For now, remove DenyImports/Exports since those get modified at runtime
 		// to add JS APIs.
 		cp.DenyImports, cp.DenyExports = nil, nil
+		cp.AllowImports, cp.AllowExports = nil, nil
 		// Remove compression mode
 		cp.Compression = CompressionOpts{}
 		// Reset disabled status

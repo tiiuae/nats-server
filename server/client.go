@@ -15,14 +15,17 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"math/rand"
 	"net"
@@ -39,6 +42,9 @@ import (
 	"github.com/klauspost/compress/s2"
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-server/v2/internal/fastrand"
+	"github.com/pion/rtcp"
+	"github.com/pion/rtp"
+	"github.com/quic-go/quic-go"
 )
 
 // Type of client connection.
@@ -255,6 +261,10 @@ func (p WriteTimeoutPolicy) String() string {
 	}
 }
 
+const reliabilityHeader = "Reliability"
+
+var reliabilityUnrealiable = []byte("unreliable")
+
 type client struct {
 	// Here first because of use of atomics, and memory alignment.
 	stats
@@ -288,6 +298,7 @@ type client struct {
 	mperms     *msgDeny
 	darray     []string
 	pcd        map[*client]struct{}
+	pcdMu      sync.Mutex
 	atmr       *time.Timer
 	expires    time.Time
 	ping       pinfo
@@ -298,6 +309,11 @@ type client struct {
 
 	repliesSincePrune uint16
 	lastReplyPrune    time.Time
+
+	*quicConnStream
+	quicParseMu            sync.Mutex
+	quicParseStreamNext    bool
+	quicDatagramSeqCounter int64
 
 	headers bool
 
@@ -322,7 +338,8 @@ type client struct {
 	tags    jwt.TagList
 	nameTag string
 
-	tlsTo *time.Timer
+	tlsTo                  *time.Timer
+	rtpPacketLossDetectors *RtpPacketLossDetectorStore
 
 	// Authentication error override. This is used because the authentication
 	// stack is simply returning a boolean, and the only authentication error
@@ -701,6 +718,8 @@ func (c *client) setTraceLevel() {
 
 // Lock should be held
 func (c *client) initClient() {
+
+	c.rtpPacketLossDetectors = NewRtpPacketLossDetectorStore()
 	s := c.srv
 	c.cid = atomic.AddUint64(&s.gcid, 1)
 
@@ -885,6 +904,7 @@ func (c *client) registerWithAccount(acc *Account) error {
 	} else if kind == LEAF {
 		// Check if we are already connected to this cluster.
 		if rc := c.remoteCluster(); rc != _EMPTY_ && acc.hasLeafNodeCluster(rc) {
+			c.Warnf("remoteCluster: %s", rc)
 			return ErrLeafNodeLoop
 		}
 		if acc.MaxTotalLeafNodesReached() {
@@ -1184,11 +1204,18 @@ func (c *client) publicPermissions() *Permissions {
 }
 
 type denyType int
+type allowType int
 
 const (
 	pub = denyType(iota + 1)
 	sub
 	both
+)
+
+const (
+	pubAllow = allowType(iota + 1)
+	subAllow
+	bothAllow
 )
 
 // Merge client.perms structure with additional pub deny permissions
@@ -1234,11 +1261,62 @@ func (c *client) mergeDenyPermissions(what denyType, denyPubs []string) {
 	}
 }
 
+// Merge client.perms structure with additional pub allow permissions
+// Lock is held on entry.
+func (c *client) mergeAllowPermissions(what allowType, allowPubs []string) {
+	if len(allowPubs) == 0 {
+		return
+	}
+	if c.perms == nil {
+		c.perms = &permissions{}
+	}
+	var perms []*perm
+	switch what {
+	case pubAllow:
+		perms = []*perm{&c.perms.pub}
+	case subAllow:
+		perms = []*perm{&c.perms.sub}
+	case bothAllow:
+		perms = []*perm{&c.perms.pub, &c.perms.sub}
+	}
+	for _, p := range perms {
+		if p.allow == nil {
+			p.allow = NewSublistWithCache()
+		}
+	FOR_ALLOW:
+		for _, pubStr := range allowPubs {
+			r := p.allow.Match(pubStr)
+			for _, v := range r.qsubs {
+				for _, s := range v {
+					if string(s.subject) == pubStr {
+						continue FOR_ALLOW
+					}
+				}
+			}
+			for _, s := range r.psubs {
+				if string(s.subject) == pubStr {
+					continue FOR_ALLOW
+				}
+			}
+			sub := &subscription{subject: []byte(pubStr)}
+			_ = p.allow.Insert(sub)
+		}
+	}
+}
+
 // Merge client.perms structure with additional pub deny permissions
 // Client lock must not be held on entry
 func (c *client) mergeDenyPermissionsLocked(what denyType, denyPubs []string) {
 	c.mu.Lock()
 	c.mergeDenyPermissions(what, denyPubs)
+	c.mu.Unlock()
+}
+
+// Merge client.perms structure with additional pub allow permissions
+// Client lock must not be held on entry
+func (c *client) mergeAllowPermissionsLocked(what allowType, allowPubs []string) {
+	c.mu.Lock()
+	c.mergeAllowPermissions(what, allowPubs)
 	c.mu.Unlock()
 }
 
@@ -1331,7 +1409,9 @@ func (c *client) flushClients(budget time.Duration) time.Time {
 	// Check pending clients for flush.
 	for cp := range c.pcd {
 		// TODO(dlc) - Wonder if it makes more sense to create a new map?
+		c.pcdMu.Lock()
 		delete(c.pcd, cp)
+		c.pcdMu.Unlock()
 
 		// Queue up a flush for those in the set
 		cp.mu.Lock()
@@ -1479,7 +1559,11 @@ func (c *client) readLoop(pre []byte) {
 		// Main call into parser for inbound data. This will generate callouts
 		// to process messages, etc.
 		for i := 0; i < len(bufs); i++ {
-			if err := c.parse(bufs[i]); err != nil {
+			c.quicParseMu.Lock()
+			err := c.parse(bufs[i])
+			c.quicParseStreamNext = c.state != OP_START
+			c.quicParseMu.Unlock()
+			if err != nil {
 				if err == ErrMinimumVersionRequired {
 					// Special case here, currently only for leaf node connections.
 					// processLeafConnect() already sent the rejection and closed
@@ -1601,6 +1685,444 @@ func (c *client) readLoop(pre []byte) {
 			lpacc = time.Now()
 		}
 	}
+}
+
+var (
+	errFrameTooSmall     = errors.New("frame too small")
+	errInvalidSeqNum     = errors.New("invalid sequence number")
+	errInvalidFrameTotal = errors.New("invalid frame total")
+	errInvalidFrameIndex = errors.New("invalid frame index")
+)
+
+func parseFrame(buf []byte) (seqNum int64, frameTotal, frameIndex int, data []byte, err error) {
+	if len(buf) < 3 {
+		return 0, 0, 0, nil, errFrameTooSmall
+	}
+
+	seqNumVal, bytesRead := binary.Varint(buf)
+	if bytesRead <= 0 {
+		return 0, 0, 0, nil, errInvalidSeqNum
+	}
+	buf = buf[bytesRead:]
+
+	frameTotalVal, bytesRead := binary.Varint(buf)
+	if bytesRead <= 0 {
+		return 0, 0, 0, nil, errInvalidFrameTotal
+	}
+	buf = buf[bytesRead:]
+
+	frameIndexVal, bytesRead := binary.Varint(buf)
+	if bytesRead <= 0 {
+		return 0, 0, 0, nil, errInvalidFrameIndex
+	}
+
+	return seqNumVal, int(frameTotalVal), int(frameIndexVal), buf[bytesRead:], nil
+}
+
+type splitMsg struct {
+	frames       [][]byte
+	numReceived  int
+	receivedSize int64
+	receivedAt   time.Time
+}
+
+type splitMsgManager struct {
+	msgs      map[int64]*splitMsg
+	seqNums   []int64
+	totalSize int64
+	maxSize   int64
+	maxAge    time.Duration
+}
+
+func newSplitMsgManager(opts *UnreliabilityOpts) *splitMsgManager {
+	return &splitMsgManager{
+		msgs:    make(map[int64]*splitMsg),
+		maxSize: opts.MaxSplitMsgPayloadCacheSize,
+		maxAge:  opts.MaxSplitMsgAge,
+	}
+}
+
+func (s *splitMsgManager) deleteOld(newSeqNum, frameDataSize int64, now time.Time) {
+	for i := 0; len(s.seqNums) > i; {
+		if s.seqNums[i] == newSeqNum {
+			i++
+			continue
+		}
+		msg := s.msgs[s.seqNums[i]]
+		if msg == nil {
+			if i == 0 {
+				s.seqNums = s.seqNums[1:]
+			}
+			continue
+		}
+		if s.totalSize+frameDataSize > s.maxSize || now.Sub(msg.receivedAt) > s.maxAge {
+			s.totalSize -= msg.receivedSize
+			delete(s.msgs, s.seqNums[i])
+			if i == 0 {
+				s.seqNums = s.seqNums[1:]
+			}
+			continue
+		}
+		break
+	}
+}
+
+func (s *splitMsgManager) ProcessFrame(frame []byte) ([]byte, error) {
+	seqNum, frameTotal, frameIndex, frameData, err := parseFrame(frame)
+	if err != nil {
+		return nil, fmt.Errorf("parse datagram frame: %w", err)
+	}
+
+	now := time.Now()
+	s.deleteOld(seqNum, int64(len(frameData)), now)
+
+	if frameTotal == 1 {
+		return frameData, nil
+	}
+
+	msg := s.msgs[seqNum]
+	if msg != nil {
+		if len(msg.frames) != frameTotal {
+			s.totalSize -= msg.receivedSize
+			delete(s.msgs, seqNum)
+			return nil, fmt.Errorf("received frame with mismatched total %d vs existing %d for sequence %d",
+				frameTotal, len(msg.frames), seqNum)
+		}
+	} else {
+		msg = &splitMsg{
+			frames:     make([][]byte, frameTotal),
+			receivedAt: now,
+		}
+		s.msgs[seqNum] = msg
+		s.seqNums = append(s.seqNums, seqNum)
+	}
+
+	msg.frames[frameIndex] = frameData
+	msg.receivedSize += int64(len(frameData))
+	msg.numReceived++
+	s.totalSize += int64(len(frameData))
+
+	if msg.numReceived < frameTotal {
+		return nil, nil
+	}
+
+	fullMsg := bytes.Join(msg.frames, nil)
+
+	s.totalSize -= msg.receivedSize
+	delete(s.msgs, seqNum)
+
+	return fullMsg, nil
+}
+
+func (c *client) readDatagramLoop(pre []byte, unreliabilityOpts UnreliabilityOpts) {
+	// Grab the connection off the client, it will be cleared on a close.
+	// We check for that after the loop, but want to avoid a nil dereference
+	c.mu.Lock()
+	s := c.srv
+	defer s.grWG.Done()
+	if c.isClosed() {
+		c.mu.Unlock()
+		return
+	}
+	nc := c.nc
+	bufSize := startBufSize
+
+	// Check the per-account-cache for closed subscriptions
+	cpacc := c.kind == ROUTER || c.kind == GATEWAY
+	// Last per-account-cache check for closed subscriptions
+	lpacc := time.Now()
+	acc := c.acc
+	// checkCompress := c.kind == ROUTER || c.kind == LEAF
+	c.mu.Unlock()
+
+	qcs, ok := nc.(*quicConnStream)
+	if !ok {
+		c.Errorf("readDatagramLoop requires nc to be a *quicConnStream, found %T", nc)
+		c.closeConnection(ClientClosed)
+		return
+	}
+
+	// Start read buffer.
+	b := make([]byte, bufSize)
+
+	var decompress bool
+	var reader io.Reader
+	reader = nc
+
+	splitMsgs := newSplitMsgManager(&unreliabilityOpts)
+
+	for {
+		var n int
+		var err error
+
+		// If we have a pre buffer parse that first.
+		if len(pre) > 0 {
+			b = pre
+			n = len(pre)
+			pre = nil
+		} else {
+			b, err = qcs.ReceiveDatagram(context.Background())
+			n = len(b)
+			if err != nil {
+				var appErr *quic.ApplicationError
+				if errors.As(err, &appErr) && appErr.ErrorCode != 0 {
+					c.Errorf("read error: %v", err)
+				}
+				c.closeConnection(closedStateForErr(err))
+				return
+			}
+		}
+		msgType := b[0]
+		var fullMsg []byte
+		// Video message
+		switch msgType {
+		// Normal datagram packet
+		case 0:
+			frame := b[1:n]
+			// Handle message type 0 == others
+			fullMsg, err := splitMsgs.ProcessFrame(frame)
+			if fullMsg == nil {
+				if err != nil {
+					c.Errorf("split message error: %v", err)
+				}
+				continue
+			}
+			// RTP packet
+		case 1:
+
+			// Handle message type 1 == video
+			videoStreamId := b[1]
+			senderIdLength := b[2]
+			senderId := b[3 : senderIdLength+3]
+			rtpPacket := b[senderIdLength+3:]
+
+			var p rtp.Packet
+			if err := p.Unmarshal(rtpPacket); err == nil {
+
+				videoUID := formVideoUID(senderId, videoStreamId)
+				rtpDetector := c.rtpPacketLossDetectors.GetOrCreate(videoUID, p.SSRC)
+				rctpPackets := rtpDetector.CheckAndRequest(&p)
+				for _, nack := range rctpPackets {
+					nackData, marshalErr := nack.Marshal()
+					if marshalErr != nil {
+						c.Errorf("Failed to marshal NACK: %v", marshalErr)
+						continue
+					}
+					// Send the RTCP NACK packet back to the sender and add type 2 in front of the packet
+					c.Debugf("Sending NACK for sequence numbers...")
+
+					buf := make([]byte, 3+int(senderIdLength)+len(nackData))
+					buf[0] = 2
+					buf[1] = videoStreamId
+					buf[2] = senderIdLength
+					copy(buf[3:], senderId)
+					copy(buf[3+int(senderIdLength):], nackData)
+
+					qcs.SendDatagram(buf)
+				}
+
+			}
+
+			c.Debugf("Received datagram video message from %q with length %d", senderId, len(rtpPacket))
+
+			var header string
+			senderParts := bytes.SplitN(senderId, []byte("."), 2)
+			if len(senderParts) == 2 {
+				// sub device
+				header = fmt.Sprintf("LMSG %s.msg-sub.%s.video.%d %d%s", senderParts[0], senderParts[1], videoStreamId, len(rtpPacket), CR_LF)
+			} else {
+				header = fmt.Sprintf("LMSG %s.msg.video.%d %d%s", senderId, videoStreamId, len(rtpPacket), CR_LF)
+			}
+			fullMsg = make([]byte, len(rtpPacket)+len(header)+LEN_CR_LF)
+			copy(fullMsg, header)
+			copy(fullMsg[len(header):], rtpPacket)
+			copy(fullMsg[len(header)+len(rtpPacket):], CR_LF)
+			// RTCP resend request
+		case 2:
+			videoStreamId := b[1]
+			senderIdLength := b[2]
+			senderId := b[3 : senderIdLength+3]
+			rtcpPacket := b[senderIdLength+3:]
+			videoUID := fmt.Sprintf("%s.%s", string(senderId), string(videoStreamId))
+			buffer, ok := c.acc.rtpPacketBuffer.buffers[videoUID]
+			if !ok {
+				continue
+			}
+
+			// Use rtcp.Unmarshal to parse the packet
+			packets, err := rtcp.Unmarshal(rtcpPacket)
+			if err != nil {
+				// Not a valid RTCP packet, might be something else. Ignore.
+				continue
+			}
+
+			for _, packet := range packets {
+				// Check if the packet is a TransportLayerNack
+				if nack, ok := packet.(*rtcp.TransportLayerNack); ok {
+					for _, nackPair := range nack.Nacks {
+						// Get all lost sequence numbers from the NACK pair
+						lostSequences := nackPair.PacketList()
+						for _, seq := range lostSequences {
+							if rtpPacket, found := buffer.Get(seq); found {
+								c.Debugf("Retransmitting packet %d to %s", seq, qcs.RemoteAddr())
+								buf, marshalErr := rtpPacket.Marshal()
+								if marshalErr == nil {
+									// Retransmit the packet
+									qcs.SendDatagram(buf)
+								}
+							} else {
+								log.Printf("Packet %d not found in buffer for retransmission", seq)
+							}
+						}
+					}
+				}
+			}
+
+		}
+		// c.Debugf("Received datagram: %q", frame[:min(len(frame), 64)])
+		// c.Debugf("Split datagram msgs: %d", len(splitMsgs.msgs))
+		// c.Debugf("Split datagram total size: %d B", splitMsgs.totalSize)
+
+		// Check if the account has mappings and if so set the local readcache flag.
+		// We check here to make sure any changes such as config reload are reflected here.
+		// if c.kind == CLIENT || c.kind == LEAF {
+		// 	if acc.hasMappings() {
+		// 		c.in.flags.set(hasMappings)
+		// 	} else {
+		// 		c.in.flags.clear(hasMappings)
+		// 	}
+		// }
+
+		start := time.Now()
+
+		// Clear inbound stats cache
+		msgs := 0
+		bytes := 0
+		subs := 0
+
+		// Main call into parser for inbound data. This will generate callouts
+		// to process messages, etc.
+		// for i := 0; i < len(bufs); i++ {
+		c.quicParseMu.Lock()
+		if c.quicParseStreamNext {
+			c.quicParseMu.Unlock()
+			snip := protoSnippet(0, PROTO_SNIPPET_SIZE, fullMsg)
+			c.Debugf("Dropping QUIC datagram frame due to incomplete stream frame: %s", snip)
+			continue
+		}
+		err = c.parse(fullMsg)
+		if state := c.state; state != OP_START {
+			c.quicParseMu.Unlock()
+			err := fmt.Errorf("QUIC datagrams must contain full messages, state %d, buf %s", state, fullMsg)
+			c.Errorf(err.Error())
+			c.closeConnection(closedStateForErr(err))
+			return
+		}
+		c.quicParseMu.Unlock()
+		if err != nil {
+			if err == ErrMinimumVersionRequired {
+				// Special case here, currently only for leaf node connections.
+				// When process the CONNECT protocol, if the minimum version
+				// required was not met, an error was printed and sent back to
+				// the remote, and connection was closed after a certain delay
+				// (to avoid "rapid" reconnection from the remote).
+				// We don't need to do any of the things below, simply return.
+				return
+			}
+			if dur := time.Since(start); dur >= readLoopReportThreshold {
+				c.Warnf("Readloop processing time: %v", dur)
+			}
+			// Need to call flushClients because some of the clients have been
+			// assigned messages and their "fsp" incremented, and need now to be
+			// decremented and their writeLoop signaled.
+			// c.flushClients(0)
+			// handled inline
+			if err != ErrMaxPayload && err != ErrAuthentication {
+				c.Error(err)
+				c.closeConnection(ProtocolViolation)
+			}
+			return
+		}
+		// }
+
+		// If we are a ROUTER/LEAF and have processed an INFO, it is possible that
+		// we are asked to switch to compression now.
+		// if checkCompress && c.in.flags.isSet(switchToCompression) {
+		// 	c.in.flags.clear(switchToCompression)
+		// 	// For now we support only s2 compression...
+		// 	reader = s2.NewReader(nc)
+		// 	decompress = true
+		// }
+
+		// Updates stats for client and server that were collected
+		// from parsing through the buffer.
+		if msgs > 0 {
+			atomic.AddInt64(&c.inMsgs, int64(msgs))
+			atomic.AddInt64(&c.inBytes, int64(bytes))
+			if acc != nil {
+				acc.stats.Lock()
+				acc.stats.inMsgs += int64(msgs)
+				acc.stats.inBytes += int64(bytes)
+				acc.stats.Unlock()
+			}
+			atomic.AddInt64(&s.inMsgs, int64(msgs))
+			atomic.AddInt64(&s.inBytes, int64(bytes))
+		}
+
+		// Signal to writeLoop to flush to socket.
+		// last := c.flushClients(0)
+		last := time.Now()
+
+		// Update activity, check read buffer size.
+		c.mu.Lock()
+
+		// Activity based on interest changes or data/msgs.
+		// Also update last receive activity for ping sender
+		if msgs > 0 || subs > 0 {
+			c.last = last
+			c.lastIn = last
+		}
+
+		// re-snapshot the account since it can change during reload, etc.
+		acc = c.acc
+		// Refresh nc because in some cases, we have upgraded c.nc to TLS.
+		if nc != c.nc {
+			nc = c.nc
+			if decompress && nc != nil {
+				// For now we support only s2 compression...
+				reader.(*s2.Reader).Reset(nc)
+			} else if !decompress {
+				reader = nc
+			}
+		}
+		c.mu.Unlock()
+
+		// Connection was closed
+		if nc == nil {
+			return
+		}
+
+		if dur := time.Since(start); dur >= readLoopReportThreshold {
+			c.Warnf("Datagram readloop processing time: %v", dur)
+		}
+
+		// We could have had a read error from above but still read some data.
+		// If so do the close here unconditionally.
+		if err != nil {
+			c.closeConnection(closedStateForErr(err))
+			return
+		}
+
+		if cpacc && (start.Sub(lpacc)) >= closedSubsCheckInterval {
+			// c.pruneClosedSubFromPerAccountCache()
+			lpacc = time.Now()
+		}
+	}
+}
+
+func formVideoUID(senderId []byte, videoStreamId byte) string {
+	videoUID := fmt.Sprintf("%s.%s", string(senderId), string(videoStreamId))
+	return videoUID
 }
 
 // Returns the appropriate closed state for a given read error.
@@ -3802,11 +4324,17 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 
 		return didDeliver
 	}
+	isVideoSubject := isVideoSubject(subject)
+
+	isDatagramMessage := (isVideoSubject && client.quicConnStream != nil) || (c.pa.hdr > 0 &&
+		c.pa.hdr < len(msg) &&
+		bytes.Equal(getHeader(reliabilityHeader, msg[:c.pa.hdr]), reliabilityUnrealiable) &&
+		client.quicConnStream != nil)
 
 	// If we are a client and we detect that the consumer we are
 	// sending to is in a stalled state, go ahead and wait here
 	// with a limit.
-	if c.kind == CLIENT && client.out.stc != nil {
+	if c.kind == CLIENT && client.out.stc != nil && !isDatagramMessage {
 		if srv.getOpts().NoFastProducerStall {
 			mt.addEgressEvent(client, sub, errMsgTraceFastProdNoStall)
 			client.mu.Unlock()
@@ -3857,12 +4385,107 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 		}
 	}
 
-	// Queue to outbound buffer
-	client.queueOutbound(mh)
-	client.queueOutbound(msg)
-	if prodIsMQTT {
-		// Need to add CR_LF since MQTT producers don't send CR_LF
-		client.queueOutbound([]byte(CR_LF))
+	const maxFrameSize = 1200 // Define the maximum frame size
+
+	var datagramErr error
+	if isDatagramMessage {
+
+		client.Debugf("Delivering datagram message to %q, isVideoSubject=%v", subject, isVideoSubject)
+
+		if isVideoSubject {
+			var msgPayload []byte
+			if c.pa.hdr > 0 {
+				msgPayload = msg[c.pa.hdr:]
+			} else {
+				msgPayload = msg
+			}
+
+			// Strip CR_LF from the end
+			msgPayload = msgPayload[:len(msgPayload)-LEN_CR_LF]
+
+			client.Debugf("Sending datagram video message to %q", subject)
+			senderId, videoStreamId, err := parseVideoSubject(subject)
+			if err != nil {
+				client.Errorf("Error parsing video subject %q: %v", subject, err)
+				return false
+			}
+			senderIdLength := byte(len(senderId))
+			frameBuf := make([]byte, len(msgPayload)+len(senderId)+3)
+			// Add messagetype
+			frameBuf[0] = 1 // Message type 0 = custom, 1 = video
+			frameBuf[1] = videoStreamId
+
+			// Add binary length
+			frameBuf[2] = senderIdLength
+			copy(frameBuf[3:], senderId)
+
+			// Add rest of the message
+			copy(frameBuf[3+senderIdLength:], msgPayload)
+
+			datagramErr = client.quicConnStream.SendDatagram(frameBuf)
+			if datagramErr != nil {
+				client.Errorf("Error sending datagram video message: %v", datagramErr)
+				return false
+			}
+
+		} else {
+
+			client.quicDatagramSeqCounter++
+
+			fullMsgLen := len(mh) + len(msg)
+
+			frameBuf := make([]byte, maxFrameSize)
+
+			frameBuf[0] = 0 // Message type 0 = custom, 1 = video
+			seqNumSize := binary.PutVarint(frameBuf[1:], client.quicDatagramSeqCounter)
+
+			estimatedHeaderSize := seqNumSize + 2*binary.MaxVarintLen64 + 1
+			maxPayloadSize := maxFrameSize - estimatedHeaderSize
+			frameCount := (fullMsgLen + maxPayloadSize - 1) / maxPayloadSize
+
+			frameIndexPos := seqNumSize + binary.PutVarint(frameBuf[seqNumSize+1:], int64(frameCount)) + 1
+
+			for frameIndex := range frameCount {
+				payloadPos := frameIndexPos + binary.PutVarint(frameBuf[frameIndexPos:], int64(frameIndex))
+
+				start := frameIndex * maxPayloadSize
+				end := min(start+maxPayloadSize, fullMsgLen)
+
+				frameEnd := payloadPos
+
+				// Copy from mh first
+				if start < len(mh) {
+					copyEnd := min(end, len(mh))
+					frameEnd += copy(frameBuf[payloadPos:], mh[start:copyEnd])
+
+					// If the frame can fit more data, copy from msg
+					if copyEnd < end {
+						msgStart := copyEnd - len(mh)
+						msgEnd := end - len(mh)
+						frameEnd += copy(frameBuf[frameEnd:], msg[msgStart:msgEnd])
+					}
+				} else {
+					// We're past the header, copy only from msg
+					msgStart := start - len(mh)
+					msgEnd := end - len(mh)
+					frameEnd += copy(frameBuf[payloadPos:], msg[msgStart:msgEnd])
+				}
+
+				datagramErr = client.quicConnStream.SendDatagram(frameBuf[:frameEnd])
+				if datagramErr != nil {
+					client.Debugf("Error sending datagram frame %d/%d/%d: %v", client.quicDatagramSeqCounter, frameCount, frameIndex, datagramErr)
+					break
+				}
+			}
+		}
+	} else {
+		// Queue to outbound buffer
+		client.queueOutbound(mh)
+		client.queueOutbound(msg)
+		if prodIsMQTT {
+			// Need to add CR_LF since MQTT producers don't send CR_LF
+			client.queueOutbound([]byte(CR_LF))
+		}
 	}
 
 	// If we are tracking dynamic publish permissions that track reply subjects,
@@ -3899,15 +4522,67 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 	return true
 }
 
+func isVideoSubject(subject []byte) bool {
+	subjectStr := string(subject)
+	isVideoSubject := strings.Contains(subjectStr, ".msg.video.")
+	if !isVideoSubject {
+		parts := strings.Split(subjectStr, ".")
+		if len(parts) > 4 && parts[1] == "msg-sub" && parts[3] == "video" {
+			isVideoSubject = true
+		}
+	}
+	return isVideoSubject
+}
+
+// parseVideoSubject parses a subject of the form:
+//
+// <senderID>.msg.video.<videoStreamID>
+// OR
+// <hostID>.msg-sub.<senderID>.video.<videoStreamID>
+//
+// and returns the senderId bytes slice (a view over the input) and the
+// video stream id as a byte. If the subject does not match this pattern
+// or the stream id is invalid/out of range, an error is returned.
+func parseVideoSubject(subject []byte) (senderID []byte, streamID byte, err error) {
+	parts := bytes.Split(subject, []byte("."))
+	if len(parts) == 4 && bytes.Equal(parts[1], []byte("msg")) && bytes.Equal(parts[2], []byte("video")) {
+		// This matches the first pattern: <senderID>.msg.video.<videoStreamID>
+		senderID = parts[0]
+		streamIDBytes := parts[3]
+		u, perr := strconv.ParseUint(bytesToString(streamIDBytes), 10, 8)
+		if perr != nil {
+			return nil, 0, fmt.Errorf("invalid video stream id in subject: %v", perr)
+		}
+		return senderID, byte(u), nil
+	}
+
+	if len(parts) == 5 && bytes.Equal(parts[1], []byte("msg-sub")) && bytes.Equal(parts[3], []byte("video")) {
+		// This matches the second pattern: <hostID>.msg-sub.<senderID>.video.<videoStreamID>
+		// senderID will be <hostID>.<senderID>
+		senderID = bytes.Join([][]byte{parts[0], parts[2]}, []byte("."))
+		streamIDBytes := parts[4]
+		u, perr := strconv.ParseUint(bytesToString(streamIDBytes), 10, 8)
+		if perr != nil {
+			return nil, 0, fmt.Errorf("invalid video stream id in subject: %v", perr)
+		}
+		return senderID, byte(u), nil
+	}
+
+	// Subject does not match either pattern
+	return nil, 0, fmt.Errorf("subject does not match expected video patterns")
+}
+
 // Add the given sub's client to the list of clients that need flushing.
 // This must be invoked from `c`'s readLoop. No lock for c is required,
 // however, `client` lock must be held on entry. This holds true even
 // if `client` is same than `c`.
 func (c *client) addToPCD(client *client) {
+	c.pcdMu.Lock()
 	if _, ok := c.pcd[client]; !ok {
 		client.out.fsp++
 		c.pcd[client] = needFlush
 	}
+	c.pcdMu.Unlock()
 }
 
 // This will track a remote reply for an exported service that has requested
@@ -5119,6 +5794,28 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 		if srv := c.srv; srv != nil {
 			atomic.AddInt64(&srv.outMsgs, dlvMsgs)
 			atomic.AddInt64(&srv.outBytes, totalBytes)
+		}
+	}
+
+	isVideoSubject := isVideoSubject(subject)
+	if isVideoSubject {
+		senderId, videoStreamId, err := parseVideoSubject(subject)
+		if err == nil {
+			videoUID := formVideoUID(senderId, videoStreamId)
+			// We have a valid video subject, we can use the senderId and streamId.
+			buffer := c.acc.rtpPacketBuffer.GetOrCreate(videoUID)
+			// Parse RTP packet
+			var rtpPacket rtp.Packet
+			var payload []byte
+			if c.pa.hdr > 0 {
+				payload = msg[c.pa.hdr:]
+			} else {
+				payload = msg
+			}
+			if err := rtpPacket.Unmarshal(payload); err == nil {
+				buffer.Add(&rtpPacket)
+			}
+
 		}
 	}
 
