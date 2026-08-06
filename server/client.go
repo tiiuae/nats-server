@@ -43,6 +43,7 @@ import (
 	"github.com/klauspost/compress/s2"
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-server/v2/internal/fastrand"
+	"github.com/nats-io/nuid"
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/quic-go/quic-go"
@@ -307,6 +308,8 @@ type client struct {
 	last       time.Time
 	lastIn     time.Time
 	proxyKey   string
+	msgIDGen   *nuid.NUID
+	msgIDHdr   string
 
 	repliesSincePrune uint16
 	lastReplyPrune    time.Time
@@ -775,6 +778,10 @@ func (c *client) initClient() {
 	c.echo = true
 
 	c.setTraceLevel()
+	if c.kind == CLIENT && opts.GeneratedMsgIDHeaderName != _EMPTY_ {
+		c.msgIDGen = nuid.New()
+		c.msgIDHdr = opts.GeneratedMsgIDHeaderName
+	}
 
 	// This is a scratch buffer used for processMsg()
 	// The msg header starts with "RMSG ", which can be used
@@ -4997,6 +5004,9 @@ func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 	// If MQTT client, check for retain flag now that we have passed permissions check
 	if c.isMqtt() {
 		c.mqttHandlePubRetain()
+	}
+	if c.kind == CLIENT && c.msgIDGen != nil && (c.pa.hdr <= 0 || len(getHeader(c.msgIDHdr, msg[:c.pa.hdr])) == 0) {
+		msg = c.setHeader(c.msgIDHdr, c.msgIDGen.Next(), msg)
 	}
 
 	// Doing this inline as opposed to create a function (which otherwise has a measured

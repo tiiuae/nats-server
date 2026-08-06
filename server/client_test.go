@@ -28,6 +28,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -416,6 +417,227 @@ func TestClientHeaderDeliverStrippedMsg(t *testing.T) {
 	checkPayload(br, []byte("OK\r\n"), t)
 	if br.Buffered() != 0 {
 		t.Fatalf("Expected no extra bytes to be buffered, got %d", br.Buffered())
+	}
+}
+
+func TestClientMissingMsgIDHeaderIsGenerated(t *testing.T) {
+	opts := defaultServerOptions
+		opts.GeneratedMsgIDHeaderName = JSMsgId
+	s := New(&opts)
+
+	pub, _, _ := newClientForServer(s)
+	defer pub.close()
+
+	sub, sr, _ := newClientForServer(s)
+	defer sub.close()
+
+	sub.parseAsync("CONNECT {\"headers\":true}\r\nSUB foo 1\r\nPING\r\n")
+	if _, err := sr.ReadString('\n'); err != nil {
+		t.Fatalf("Error receiving msg from server: %v\n", err)
+	}
+
+	pub.parseAsync("PUB foo 2\r\nOK\r\n")
+
+	l, err := sr.ReadString('\n')
+	if err != nil {
+		t.Fatalf("Error receiving msg from server: %v\n", err)
+	}
+	am := hmsgPat.FindAllStringSubmatch(l, -1)
+	if len(am) == 0 {
+		t.Fatalf("Did not get a match for %q", l)
+	}
+	matches := am[0]
+	hdrLen, err := strconv.Atoi(matches[HDR_INDEX])
+	if err != nil {
+		t.Fatalf("Error parsing header length: %v", err)
+	}
+	totalLen, err := strconv.Atoi(matches[TLEN_INDEX])
+	if err != nil {
+		t.Fatalf("Error parsing total length: %v", err)
+	}
+	payload := make([]byte, totalLen)
+	if _, err := io.ReadFull(sr, payload); err != nil {
+		t.Fatalf("Error receiving msg payload from server: %v\n", err)
+	}
+	hdr := payload[:hdrLen]
+	if got := string(getHeader(JSMsgId, hdr)); got == _EMPTY_ {
+		t.Fatal("Expected generated Nats-Msg-Id header")
+	}
+	if bytes.Count(hdr, []byte(JSMsgId+":")) != 1 {
+		t.Fatalf("Expected a single Nats-Msg-Id header, got %q", hdr)
+	}
+	if body := payload[hdrLen:]; !bytes.Equal(body, []byte("OK")) {
+		t.Fatalf("Did not read correct payload:: <%s>\n", body)
+	}
+	checkPayload(sr, []byte("\r\n"), t)
+	if sr.Buffered() != 0 {
+		t.Fatalf("Expected no extra bytes to be buffered, got %d", sr.Buffered())
+	}
+}
+
+func TestClientExistingMsgIDHeaderPreservedWhenGenerationEnabled(t *testing.T) {
+	opts := defaultServerOptions
+	opts.GeneratedMsgIDHeaderName = JSMsgId
+	s := New(&opts)
+
+	pub, _, _ := newClientForServer(s)
+	defer pub.close()
+
+	sub, sr, _ := newClientForServer(s)
+	defer sub.close()
+
+	sub.parseAsync("CONNECT {\"headers\":true}\r\nSUB foo 1\r\nPING\r\n")
+	if _, err := sr.ReadString('\n'); err != nil {
+		t.Fatalf("Error receiving msg from server: %v\n", err)
+	}
+
+	header := "NATS/1.0\r\nNats-Msg-Id: user-id\r\n\r\n"
+	pub.parseAsync(fmt.Sprintf("CONNECT {\"headers\":true}\r\nHPUB foo %d %d\r\n%sOK\r\n", len(header), len(header)+2, header))
+
+	l, err := sr.ReadString('\n')
+	if err != nil {
+		t.Fatalf("Error receiving msg from server: %v\n", err)
+	}
+	am := hmsgPat.FindAllStringSubmatch(l, -1)
+	if len(am) == 0 {
+		t.Fatalf("Did not get a match for %q", l)
+	}
+	matches := am[0]
+	hdrLen, err := strconv.Atoi(matches[HDR_INDEX])
+	if err != nil {
+		t.Fatalf("Error parsing header length: %v", err)
+	}
+	totalLen, err := strconv.Atoi(matches[TLEN_INDEX])
+	if err != nil {
+		t.Fatalf("Error parsing total length: %v", err)
+	}
+	payload := make([]byte, totalLen)
+	if _, err := io.ReadFull(sr, payload); err != nil {
+		t.Fatalf("Error receiving msg payload from server: %v\n", err)
+	}
+	hdr := payload[:hdrLen]
+	if got := string(getHeader(JSMsgId, hdr)); got != "user-id" {
+		t.Fatalf("Expected Nats-Msg-Id to be preserved, got %q", got)
+	}
+	if bytes.Count(hdr, []byte(JSMsgId+":")) != 1 {
+		t.Fatalf("Expected a single Nats-Msg-Id header, got %q", hdr)
+	}
+	if body := payload[hdrLen:]; !bytes.Equal(body, []byte("OK")) {
+		t.Fatalf("Did not read correct payload:: <%s>\n", body)
+	}
+	checkPayload(sr, []byte("\r\n"), t)
+	if sr.Buffered() != 0 {
+		t.Fatalf("Expected no extra bytes to be buffered, got %d", sr.Buffered())
+	}
+}
+
+func TestClientMissingCustomMsgIDHeaderIsGenerated(t *testing.T) {
+	opts := defaultServerOptions
+	opts.GeneratedMsgIDHeaderName = "X-Custom-Msg-Id"
+	s := New(&opts)
+
+	pub, _, _ := newClientForServer(s)
+	defer pub.close()
+
+	sub, sr, _ := newClientForServer(s)
+	defer sub.close()
+
+	sub.parseAsync("CONNECT {\"headers\":true}\r\nSUB foo 1\r\nPING\r\n")
+	if _, err := sr.ReadString('\n'); err != nil {
+		t.Fatalf("Error receiving msg from server: %v\n", err)
+	}
+
+	pub.parseAsync("PUB foo 2\r\nOK\r\n")
+
+	l, err := sr.ReadString('\n')
+	if err != nil {
+		t.Fatalf("Error receiving msg from server: %v\n", err)
+	}
+	am := hmsgPat.FindAllStringSubmatch(l, -1)
+	if len(am) == 0 {
+		t.Fatalf("Did not get a match for %q", l)
+	}
+	matches := am[0]
+	hdrLen, err := strconv.Atoi(matches[HDR_INDEX])
+	if err != nil {
+		t.Fatalf("Error parsing header length: %v", err)
+	}
+	totalLen, err := strconv.Atoi(matches[TLEN_INDEX])
+	if err != nil {
+		t.Fatalf("Error parsing total length: %v", err)
+	}
+	payload := make([]byte, totalLen)
+	if _, err := io.ReadFull(sr, payload); err != nil {
+		t.Fatalf("Error receiving msg payload from server: %v\n", err)
+	}
+	hdr := payload[:hdrLen]
+	if got := string(getHeader("X-Custom-Msg-Id", hdr)); got == _EMPTY_ {
+		t.Fatal("Expected generated X-Custom-Msg-Id header")
+	}
+	if bytes.Count(hdr, []byte("X-Custom-Msg-Id:")) != 1 {
+		t.Fatalf("Expected a single X-Custom-Msg-Id header, got %q", hdr)
+	}
+	if got := string(getHeader(JSMsgId, hdr)); got != _EMPTY_ {
+		t.Fatalf("Expected no generated %s header, got %q", JSMsgId, got)
+	}
+}
+
+func TestClientExistingCustomMsgIDHeaderIsPreservedCaseInsensitive(t *testing.T) {
+	opts := defaultServerOptions
+	opts.GeneratedMsgIDHeaderName = "X-Custom-Msg-Id"
+	s := New(&opts)
+
+	pub, _, _ := newClientForServer(s)
+	defer pub.close()
+
+	sub, sr, _ := newClientForServer(s)
+	defer sub.close()
+
+	sub.parseAsync("CONNECT {\"headers\":true}\r\nSUB foo 1\r\nPING\r\n")
+	if _, err := sr.ReadString('\n'); err != nil {
+		t.Fatalf("Error receiving msg from server: %v\n", err)
+	}
+
+	header := "NATS/1.0\r\nx-custom-msg-id: user-id\r\n\r\n"
+	pub.parseAsync(fmt.Sprintf("CONNECT {\"headers\":true}\r\nHPUB foo %d %d\r\n%sOK\r\n", len(header), len(header)+2, header))
+
+	l, err := sr.ReadString('\n')
+	if err != nil {
+		t.Fatalf("Error receiving msg from server: %v\n", err)
+	}
+	am := hmsgPat.FindAllStringSubmatch(l, -1)
+	if len(am) == 0 {
+		t.Fatalf("Did not get a match for %q", l)
+	}
+	matches := am[0]
+	hdrLen, err := strconv.Atoi(matches[HDR_INDEX])
+	if err != nil {
+		t.Fatalf("Error parsing header length: %v", err)
+	}
+	totalLen, err := strconv.Atoi(matches[TLEN_INDEX])
+	if err != nil {
+		t.Fatalf("Error parsing total length: %v", err)
+	}
+	payload := make([]byte, totalLen)
+	if _, err := io.ReadFull(sr, payload); err != nil {
+		t.Fatalf("Error receiving msg payload from server: %v\n", err)
+	}
+	hdr := payload[:hdrLen]
+	if got := string(getHeader("X-Custom-Msg-Id", hdr)); got != "user-id" {
+		t.Fatalf("Expected X-Custom-Msg-Id to be preserved case-insensitively, got %q", got)
+	}
+	if bytes.Count(bytes.ToLower(hdr), []byte("x-custom-msg-id:")) != 1 {
+		t.Fatalf("Expected a single X-Custom-Msg-Id header regardless of case, got %q", hdr)
+	}
+	if got := string(getHeader(JSMsgId, hdr)); got != _EMPTY_ {
+		t.Fatalf("Expected no generated %s header, got %q", JSMsgId, got)
+	}
+	if body := payload[hdrLen:]; !bytes.Equal(body, []byte("OK")) {
+		t.Fatalf("Did not read correct payload:: <%s>\n", body)
+	}
+	checkPayload(sr, []byte("\r\n"), t)
+	if sr.Buffered() != 0 {
+		t.Fatalf("Expected no extra bytes to be buffered, got %d", sr.Buffered())
 	}
 }
 

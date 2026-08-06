@@ -1180,6 +1180,9 @@ func validateOptions(o *Options) error {
 	if o.ServerName != _EMPTY_ && strings.Contains(o.ServerName, " ") {
 		return errors.New("server name cannot contain spaces")
 	}
+	if o.NoHeaderSupport && o.GeneratedMsgIDHeaderName != _EMPTY_ {
+		return ErrMsgIDHeaderGenerationRequiresHeaders
+	}
 	// Check that the trust configuration is correct.
 	if err := validateTrustedOperators(o); err != nil {
 		return err
