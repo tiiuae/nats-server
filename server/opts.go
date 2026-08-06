@@ -276,6 +276,7 @@ type Options struct {
 	NoSigs                     bool          `json:"-"`
 	NoSublistCache             bool          `json:"-"`
 	NoHeaderSupport            bool          `json:"-"`
+	GeneratedMsgIDHeaderName   string        `json:"-"`
 	DisableShortFirstPing      bool          `json:"-"`
 	Logtime                    bool          `json:"-"`
 	LogtimeUTC                 bool          `json:"-"`
@@ -1493,6 +1494,8 @@ func (o *Options) processConfigFileLine(k string, v any, errors *[]error, warnin
 		o.NoSystemAccount = v.(bool)
 	case "no_header_support":
 		o.NoHeaderSupport = v.(bool)
+	case "generated_msg_id_header_name":
+		o.GeneratedMsgIDHeaderName = v.(string)
 	case "trusted", "trusted_keys":
 		switch v := v.(type) {
 		case string:

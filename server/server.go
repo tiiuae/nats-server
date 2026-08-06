@@ -1023,6 +1023,9 @@ func validateOptions(o *Options) error {
 		return fmt.Errorf("max_payload (%v) cannot be higher than max_pending (%v)",
 			o.MaxPayload, o.MaxPending)
 	}
+	if o.NoHeaderSupport && o.GeneratedMsgIDHeaderName != _EMPTY_ {
+		return ErrMsgIDHeaderGenerationRequiresHeaders
+	}
 	// Check that the trust configuration is correct.
 	if err := validateTrustedOperators(o); err != nil {
 		return err

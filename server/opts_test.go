@@ -3098,6 +3098,37 @@ func TestClusterNameAndGatewayNameConflict(t *testing.T) {
 	}
 }
 
+func TestGeneratedMsgIDHeaderNameOption(t *testing.T) {
+	conf := createConfFile(t, []byte(`
+		listen: 127.0.0.1:-1
+		generated_msg_id_header_name: X-Test-Msg-Id
+	`))
+
+	opts, err := ProcessConfigFile(conf)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if opts.GeneratedMsgIDHeaderName != "X-Test-Msg-Id" {
+		t.Fatalf("Expected generated_msg_id_header_name to be %q, got %q", "X-Test-Msg-Id", opts.GeneratedMsgIDHeaderName)
+	}
+}
+
+func TestGeneratedMsgIDHeaderNameRequiresHeaders(t *testing.T) {
+	conf := createConfFile(t, []byte(`
+		listen: 127.0.0.1:-1
+		no_header_support: true
+		generated_msg_id_header_name: Nats-Msg-Id
+	`))
+
+	opts, err := ProcessConfigFile(conf)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if err := validateOptions(opts); err != ErrMsgIDHeaderGenerationRequiresHeaders {
+		t.Fatalf("Expected ErrMsgIDHeaderGenerationRequiresHeaders got %v", err)
+	}
+}
+
 func TestDefaultAuthTimeout(t *testing.T) {
 	opts := DefaultOptions()
 	opts.AuthTimeout = 0

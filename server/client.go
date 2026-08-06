@@ -37,6 +37,7 @@ import (
 
 	"github.com/klauspost/compress/s2"
 	"github.com/nats-io/jwt/v2"
+	"github.com/nats-io/nuid"
 	"github.com/quic-go/quic-go"
 	"github.com/tiiuae/nats-server/v2/internal/fastrand"
 )
@@ -267,6 +268,8 @@ type client struct {
 	msgb       [msgScratchSize]byte
 	last       time.Time
 	lastIn     time.Time
+	msgIDGen   *nuid.NUID
+	msgIDHdr   string
 
 	repliesSincePrune uint16
 	lastReplyPrune    time.Time
@@ -686,6 +689,10 @@ func (c *client) initClient() {
 	c.echo = true
 
 	c.setTraceLevel()
+	if c.kind == CLIENT && opts.GeneratedMsgIDHeaderName != _EMPTY_ {
+		c.msgIDGen = nuid.New()
+		c.msgIDHdr = opts.GeneratedMsgIDHeaderName
+	}
 
 	// This is a scratch buffer used for processMsg()
 	// The msg header starts with "RMSG ", which can be used
@@ -4325,6 +4332,9 @@ func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 	if c.isMqtt() {
 		c.mqttHandlePubRetain()
 	}
+	if c.kind == CLIENT && c.msgIDGen != nil && (c.pa.hdr <= 0 || len(getHeader(c.msgIDHdr, msg[:c.pa.hdr])) == 0) {
+		msg = c.setHeader(c.msgIDHdr, c.msgIDGen.Next(), msg)
+	}
 
 	// Doing this inline as opposed to create a function (which otherwise has a measured
 	// performance impact reported in our bench)
@@ -4500,21 +4510,51 @@ func (c *client) setupResponseServiceImport(acc *Account, si *serviceImport, tra
 }
 
 // Will remove a header if present.
+func findHeaderLine(hdr []byte, key string) (lineStart, lineEnd, valueStart int, ok bool) {
+	if len(hdr) == 0 {
+		return 0, 0, 0, false
+	}
+
+	statusEnd := bytes.Index(hdr, []byte(_CRLF_))
+	if statusEnd < 0 {
+		return 0, 0, 0, false
+	}
+
+	keyBytes := []byte(key)
+	for start := statusEnd + LEN_CR_LF; start < len(hdr); {
+		endOffset := bytes.Index(hdr[start:], []byte(_CRLF_))
+		if endOffset < 0 {
+			return 0, 0, 0, false
+		}
+		end := start + endOffset
+		if end == start {
+			return 0, 0, 0, false
+		}
+
+		colonOffset := bytes.IndexByte(hdr[start:end], ':')
+		if colonOffset > 0 {
+			keyEnd := start + colonOffset
+			if bytes.EqualFold(hdr[start:keyEnd], keyBytes) {
+				valueStart = keyEnd + 1
+				for valueStart < end && hdr[valueStart] == ' ' {
+					valueStart++
+				}
+				return start, end, valueStart, true
+			}
+		}
+
+		start = end + LEN_CR_LF
+	}
+
+	return 0, 0, 0, false
+}
+
 func removeHeaderIfPresent(hdr []byte, key string) []byte {
-	start := bytes.Index(hdr, []byte(key))
-	// key can't be first and we want to check that it is preceded by a '\n'
-	if start < 1 || hdr[start-1] != '\n' {
+	start, end, _, ok := findHeaderLine(hdr, key)
+	if !ok {
 		return hdr
 	}
-	index := start + len(key)
-	if index >= len(hdr) || hdr[index] != ':' {
-		return hdr
-	}
-	end := bytes.Index(hdr[start:], []byte(_CRLF_))
-	if end < 0 {
-		return hdr
-	}
-	hdr = append(hdr[:start], hdr[start+end+len(_CRLF_):]...)
+	hdr = append(hdr[:start], hdr[end+LEN_CR_LF:]...)
 	if len(hdr) <= len(emptyHdrLine) {
 		return nil
 	}
@@ -4605,39 +4645,11 @@ func (c *client) setHeader(key, value string, msg []byte) []byte {
 // Will return the value for the header denoted by key or nil if it does not exists.
 // This function ignores errors and tries to achieve speed and no additional allocations.
 func getHeader(key string, hdr []byte) []byte {
-	if len(hdr) == 0 {
+	_, end, valueStart, ok := findHeaderLine(hdr, key)
+	if !ok {
 		return nil
 	}
-	index := bytes.Index(hdr, []byte(key))
-	hdrLen := len(hdr)
-	// Check that we have enough characters, this will handle the -1 case of the key not
-	// being found and will also handle not having enough characters for trailing CRLF.
-	if index < 2 {
-		return nil
-	}
-	// There should be a terminating CRLF.
-	if index >= hdrLen-1 || hdr[index-1] != '\n' || hdr[index-2] != '\r' {
-		return nil
-	}
-	// The key should be immediately followed by a : separator.
-	index += len(key) + 1
-	if index >= hdrLen || hdr[index-1] != ':' {
-		return nil
-	}
-	// Skip over whitespace before the value.
-	for index < hdrLen && hdr[index] == ' ' {
-		index++
-	}
-	// Collect together the rest of the value until we hit a CRLF.
-	var value []byte
-	for index < hdrLen {
-		if hdr[index] == '\r' && index < hdrLen-1 && hdr[index+1] == '\n' {
-			break
-		}
-		value = append(value, hdr[index])
-		index++
-	}
-	return value
+	return hdr[valueStart:end]
 }
 
 // For bytes.HasPrefix below.

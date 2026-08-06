@@ -23229,6 +23229,89 @@ func TestJetStreamMessageDependencyHeaders(t *testing.T) {
 	require_Equal(t, msg.Header.Get("MSG-DEPS"), "{\"STREAM-ONE\":1}")
 }
 
+func TestJetStreamMessageDependencyHeadersPreservePayloadWithExistingHeaders(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	streamOneName := "STREAM-ONE"
+	streamOneSubjectPrefix := "stream.one"
+	streamTwoName := "STREAM-TWO"
+	streamTwoSubjectPrefix := "stream.two"
+
+	_, err := js.AddStream(getMessageDependencyStreamConfig(streamOneName, streamOneSubjectPrefix, streamTwoName))
+	require_NoError(t, err)
+
+	_, err = js.AddStream(getMessageDependencyStreamConfig(streamTwoName, streamTwoSubjectPrefix, streamOneName))
+	require_NoError(t, err)
+
+	msgToPublish := nats.NewMsg(fmt.Sprintf("%s.%s", streamOneSubjectPrefix, "01"))
+	msgToPublish.Header.Set(JSMsgId, "generated-like-id")
+	msgToPublish.Data = []byte{0x08, 0x96, 0x01}
+
+	_, err = js.PublishMsg(msgToPublish)
+	require_NoError(t, err)
+
+	sub, err := js.SubscribeSync(fmt.Sprintf("%s.>", streamOneSubjectPrefix))
+	require_NoError(t, err)
+
+	msg, err := sub.NextMsg(time.Second)
+	require_NoError(t, err)
+	require_Equal(t, msg.Subject, msgToPublish.Subject)
+	require_Equal(t, msg.Header.Get(JSMsgId), "generated-like-id")
+	require_Equal(t, msg.Header.Get("MSG-DEPS"), "{}")
+	if !bytes.Equal(msg.Data, msgToPublish.Data) {
+		t.Fatalf("expected payload %v, got %v", msgToPublish.Data, msg.Data)
+	}
+}
+
+func TestJetStreamMessageDependencyHeadersPreservePayloadWithGeneratedMsgID(t *testing.T) {
+	opts := DefaultTestOptions
+	opts.Port = -1
+	opts.JetStream = true
+	opts.StoreDir = t.TempDir()
+	opts.GeneratedMsgIDHeaderName = JSMsgId
+	s := RunServer(&opts)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	streamOneName := "STREAM-ONE"
+	streamOneSubjectPrefix := "stream.one"
+	streamTwoName := "STREAM-TWO"
+	streamTwoSubjectPrefix := "stream.two"
+
+	_, err := js.AddStream(getMessageDependencyStreamConfig(streamOneName, streamOneSubjectPrefix, streamTwoName))
+	require_NoError(t, err)
+
+	_, err = js.AddStream(getMessageDependencyStreamConfig(streamTwoName, streamTwoSubjectPrefix, streamOneName))
+	require_NoError(t, err)
+
+	sub, err := js.SubscribeSync(fmt.Sprintf("%s.>", streamOneSubjectPrefix))
+	require_NoError(t, err)
+
+	subject := fmt.Sprintf("%s.%s", streamOneSubjectPrefix, "01")
+	payload := []byte{0x08, 0x96, 0x01}
+	err = nc.Publish(subject, payload)
+	require_NoError(t, err)
+	err = nc.Flush()
+	require_NoError(t, err)
+
+	msg, err := sub.NextMsg(time.Second)
+	require_NoError(t, err)
+	require_Equal(t, msg.Subject, subject)
+	require_Equal(t, msg.Header.Get("MSG-DEPS"), "{}")
+	if msg.Header.Get(JSMsgId) == _EMPTY_ {
+		t.Fatal("expected generated Nats-Msg-Id header")
+	}
+	if !bytes.Equal(msg.Data, payload) {
+		t.Fatalf("expected payload %v, got %v", payload, msg.Data)
+	}
+}
+
 func TestJetStreamMessageDependencyChecks(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()

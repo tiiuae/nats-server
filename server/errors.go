@@ -174,6 +174,10 @@ var (
 	// on if they want no responders behavior.
 	ErrNoRespondersRequiresHeaders = errors.New("no responders requires headers support")
 
+	// ErrMsgIDHeaderGenerationRequiresHeaders signals that automatic
+	// Nats-Msg-Id generation requires server header support.
+	ErrMsgIDHeaderGenerationRequiresHeaders = errors.New("msg id header generation requires headers support")
+
 	// ErrClusterNameConfigConflict signals that the options for cluster name in cluster and gateway are in conflict.
 	ErrClusterNameConfigConflict = errors.New("cluster name conflicts between cluster and gateway definitions")
 

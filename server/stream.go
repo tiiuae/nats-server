@@ -4339,6 +4339,19 @@ func (mset *stream) createMessageDependenciesHeader() ([]byte, error) {
 	return hdr, nil
 }
 
+func mergeHeaderBlocks(hdr, extra []byte) []byte {
+	if len(hdr) == 0 {
+		return extra
+	}
+	if len(extra) == 0 {
+		return hdr
+	}
+	merged := make([]byte, 0, len(hdr)+len(extra)-len(hdrLine)-LEN_CR_LF)
+	merged = append(merged, hdr[:len(hdr)-LEN_CR_LF]...)
+	merged = append(merged, extra[len(hdrLine):]...)
+	return merged
+}
+
 // processInboundJetStreamMsg handles processing messages bound for a stream.
 func (mset *stream) processInboundJetStreamMsg(_ *subscription, c *client, _ *Account, subject, reply string, rmsg []byte) {
 	hdr, msg := c.msgParts(copyBytes(rmsg)) // Need to copy.
@@ -4348,10 +4361,7 @@ func (mset *stream) processInboundJetStreamMsg(_ *subscription, c *client, _ *Ac
 			mset.srv.Errorf("Failed to create dependencies header in stream '%s' for subject '%s': %v", mset.cfg.Name, subject, err)
 		} else {
 			mset.srv.Debugf("Created dependencies header in stream '%s' for subject '%s': %s", mset.cfg.Name, subject, string(depsHdr))
-			if hdr == nil {
-				hdr = make([]byte, 0, len(depsHdr))
-			}
-			hdr = append(hdr, depsHdr...)
+			hdr = mergeHeaderBlocks(hdr, depsHdr)
 			mset.srv.Debugf("Added dependencies header in stream '%s' for subject '%s': %s", mset.cfg.Name, subject, string(hdr))
 		}
 	}
